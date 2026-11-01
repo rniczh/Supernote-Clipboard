@@ -1,0 +1,16 @@
+{
+  "name": "PC Clipboard",
+  "desc": "Paste screenshots taken on your computer into the note with one tap. Requires the Supernote Clipboard app on your computer.",
+  "author": "rnic",
+  "iconPath": "assets/icon.png",
+  "versionName": "1.2.0",
+  "versionCode": "3",
+  "pluginID": "yodhravxuckwzy64",
+  "pluginKey": "PCClipboard",
+  "jsMainPath": "index",
+  "uses-permissions": [
+    "plugin.permission.INTERNET",
+    "plugin.permission.FILE:WRITE",
+    "plugin.permission.FILE:READ"
+  ]
+}

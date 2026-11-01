@@ -1,0 +1,10 @@
+.toolchain/
+node_modules/
+supernote-plugin/build/
+supernote-plugin/android/app/build/
+supernote-plugin/android/build/
+supernote-plugin/android/.gradle/
+supernote-plugin/android_project_react_packages.txt
+__pycache__
+dist/
+.DS_Store
