@@ -2,6 +2,10 @@
 
 Take a screenshot on your computer, tap **Paste screenshot** on your Supernote, and the image is inserted into the note you are writing in.
 
+![Demo: capturing a region on the Mac and pasting it into a Supernote note](docs/demo.gif)
+
+*Supernote screen on the left, the Supernote Clipboard window on the right (4× speed). [Watch the full video](docs/demo.mp4).*
+
 The project has two parts:
 
 | Part | Where it runs | What it does |
