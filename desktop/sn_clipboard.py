@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "Supernote Clipboard"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 DEFAULT_PORT = 8765
 MAX_SHOTS = 30
 MAX_UPLOAD_BYTES = 40 * 1024 * 1024
