@@ -4,7 +4,8 @@ Copy something on your computer, then tap **Paste from PC** on the Supernote. A 
 
 You can also send a photo or copied text from your phone. Tap **Paste from phone**, scan the QR code, and pick a photo or paste what you copied. Details are in [Paste from your phone](#paste-from-your-phone).
 
-![Demo (outdated): capturing a region on the Mac and pasting it into a Supernote note](docs/demo.gif)
+**This demo video is outdated**
+![Demo: capturing a region on the Mac and pasting it into a Supernote note](docs/demo.gif)
 
 *[Watch the full video](docs/demo.mp4).*
 
