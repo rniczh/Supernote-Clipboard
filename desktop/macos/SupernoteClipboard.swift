@@ -78,9 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.applyShortcut("")
             }
             let paired = (state["devices"] as? [Any])?.count ?? 0
-            let shots = (state["shots"] as? [Any])?.count ?? 0
+            let items = (state["shots"] as? [Any])?.count ?? 0
             let devices = paired == 0 ? "No Supernote paired" : "Paired with \(paired) Supernote\(paired == 1 ? "" : "s")"
-            self.statusLine.title = "\(devices) · \(shots) screenshot\(shots == 1 ? "" : "s")"
+            self.statusLine.title = "\(devices) · \(items) item\(items == 1 ? "" : "s") to paste"
         }
     }
 

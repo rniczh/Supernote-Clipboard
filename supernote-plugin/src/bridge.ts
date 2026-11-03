@@ -4,14 +4,18 @@ import {displayAddress, type Settings} from './settings';
 
 const APP_NAME = 'Supernote Clipboard';
 
-/** A screenshot held by the Supernote Clipboard app on the computer. */
-export type Shot = {
+/** An image or a piece of text held by the Supernote Clipboard app on the computer. */
+export type Clip = {
   id: string;
-  ext: 'png' | 'jpg';
+  kind: 'image' | 'text';
+  ext: 'png' | 'jpg' | 'txt';
   width: number;
   height: number;
   createdAt: number;
   source: string;
+  /** Text only: length and the first few hundred characters. */
+  chars?: number;
+  preview?: string;
 };
 
 export type ServerInfo = {
@@ -28,13 +32,17 @@ export type PairingStatus =
 const SHOT_ID_RE = /^\d{8}-\d{6}-[0-9a-f]{4}$/;
 const REQUEST_TIMEOUT_MS = 6000;
 
-function isShot(value: any): value is Shot {
-  return (
-    value &&
-    typeof value.id === 'string' &&
-    SHOT_ID_RE.test(value.id) &&
-    (value.ext === 'png' || value.ext === 'jpg')
-  );
+/** Validates a clip from the computer. */
+function toClip(value: any): Clip | null {
+  if (!value || typeof value.id !== 'string' || !SHOT_ID_RE.test(value.id)) {
+    return null;
+  }
+  const kind = value.kind ?? 'image';
+  const valid =
+    kind === 'text'
+      ? value.ext === 'txt'
+      : kind === 'image' && (value.ext === 'png' || value.ext === 'jpg');
+  return valid ? {...value, kind} : null;
 }
 
 /** Why a request did not reach Supernote Clipboard, in words for the notice banner. */
@@ -154,32 +162,43 @@ function httpError(status: number, body: any) {
   return new UserError(body?.error || `Your computer answered with HTTP ${status}.`, 'network');
 }
 
-/** Newest screenshot, or null when the computer has none yet. */
-export async function getLatestShot(settings: Settings): Promise<Shot | null> {
-  const {status, body} = await getJson(settings, '/api/latest');
+const KINDS = 'kinds=image,text';
+
+/** Newest image or text, or null when the computer has nothing yet. */
+export async function getLatestClip(settings: Settings): Promise<Clip | null> {
+  const {status, body} = await getJson(settings, `/api/latest?${KINDS}`);
   if (status === 404) {
     return null;
   }
   if (status !== 200) {
     throw httpError(status, body);
   }
-  return isShot(body?.shot) ? body.shot : null;
+  return toClip(body?.shot);
 }
 
-export async function listShots(settings: Settings): Promise<Shot[]> {
-  const {status, body} = await getJson(settings, '/api/shots');
+export async function listClips(settings: Settings): Promise<Clip[]> {
+  const {status, body} = await getJson(settings, `/api/shots?${KINDS}`);
   if (status !== 200) {
     throw httpError(status, body);
   }
-  return Array.isArray(body?.shots) ? body.shots.filter(isShot) : [];
+  const clips = Array.isArray(body?.shots) ? body.shots.map(toClip) : [];
+  return clips.filter((clip: Clip | null): clip is Clip => clip !== null);
+}
+
+export async function getClipText(settings: Settings, clip: Clip): Promise<string> {
+  const {status, body} = await getJson(settings, `/api/text/${clip.id}`);
+  if (status !== 200 || typeof body?.text !== 'string') {
+    throw httpError(status, body);
+  }
+  return body.text;
 }
 
 export function tokenHeaders(settings: Settings): Record<string, string> {
   return {'X-SN-Token': settings.token};
 }
 
-/** Image URL; the computer scales the image down when it is wider than maxWidth. */
-export function shotUrl(settings: Settings, shot: Shot, maxWidth?: number) {
+/** Image URL: the computer scales the image down when it is wider than maxWidth. */
+export function shotUrl(settings: Settings, clip: Clip, maxWidth?: number) {
   const query = maxWidth ? `?maxWidth=${Math.round(maxWidth)}` : '';
-  return `${settings.serverUrl}/api/shots/${shot.id}.${shot.ext}${query}`;
+  return `${settings.serverUrl}/api/shots/${clip.id}.${clip.ext}${query}`;
 }

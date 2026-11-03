@@ -1,6 +1,6 @@
 import {useSyncExternalStore} from 'react';
 
-export type Screen = 'shots' | 'settings';
+export type Screen = 'shots' | 'phone' | 'settings';
 
 export type Notice = {text: string; error: boolean};
 

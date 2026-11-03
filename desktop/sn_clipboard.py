@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Supernote Clipboard - a screenshot bridge for the "PC Clipboard" Supernote plugin.
+"""Supernote Clipboard - a clipboard bridge for the "PC Clipboard" Supernote plugin.
 
-Take a screenshot on your computer, then tap "Paste screenshot" on your Supernote
-and the image is inserted into the note you are writing in.
+Take a screenshot or copy some text on your computer, then tap "Paste from PC" on
+your Supernote: images are inserted as grayscale pictures sized for the page, text
+as an editable text box.
 
-Screenshots enter the app in three ways:
+Items enter the app in three ways:
   * region capture: the global shortcut (Option+Shift+S on macOS, Ctrl+Alt+S on
     Windows), the "Capture region" button, or `sn_clipboard.py capture`
-  * any screenshot/image copied to the system clipboard (auto-import)
+  * any image or text copied to the system clipboard, and image files copied in the
+    file manager (auto-import; passwords copied from password managers are skipped)
   * drag & drop or Ctrl/Cmd+V into the web UI
+
+Images may be PNG, JPEG, WebP, HEIC, AVIF, GIF, TIFF, BMP, SVG, PDF, PSD, ICO, JPEG 2000
+or TGA; anything other than PNG/JPEG is converted on arrival, since notes only take those.
+
+Storage limits are set in the web UI (or with --keep-days, --max-items, --max-mb):
+by default items are deleted after 7 days, only the newest 30 are kept, and there is
+no size limit. Each limit can be turned off.
 
 The Supernote finds this app on your Wi-Fi network by itself. The first time a
 Supernote connects, the web UI asks you to allow it; after that it is paired and
@@ -44,10 +53,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "Supernote Clipboard"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DEFAULT_PORT = 8765
-MAX_SHOTS = 30
+# Storage limits; 0 means no limit. (default, largest accepted value)
+STORAGE_LIMITS = {
+    "keep_days": (7, 3650),
+    "max_items": (30, 100000),
+    "max_mb": (0, 1000000),
+}
+MAX_TEXT_CHARS = 20000
 MAX_UPLOAD_BYTES = 40 * 1024 * 1024
+MAX_FILES_PER_COPY = 20
 PAIR_REQUEST_TTL = 120
 MAX_PENDING_PAIRS = 5
 SYSTEM = platform.system()
@@ -71,6 +87,8 @@ class Config:
         self.server_id = ""
         self.port = DEFAULT_PORT
         self.watch_clipboard = True
+        self.watch_text = True
+        self.limits = {name: default for name, (default, _) in STORAGE_LIMITS.items()}
         self.hotkey = DEFAULT_HOTKEY
         self.devices = []  # [{"id", "name", "token", "pairedAt"}]
         self.lock = threading.RLock()
@@ -86,6 +104,8 @@ class Config:
         self.server_id = str(data.get("server_id") or secrets.token_hex(8))
         self.port = int(data.get("port") or DEFAULT_PORT)
         self.watch_clipboard = bool(data.get("watch_clipboard", True))
+        self.watch_text = bool(data.get("watch_text", True))
+        self.set_limits({name: data[name] for name in STORAGE_LIMITS if name in data})
         self.hotkey = str(data.get("hotkey", DEFAULT_HOTKEY))
         self.devices = [d for d in data.get("devices", []) if isinstance(d, dict) and d.get("token")]
         self.save()
@@ -97,12 +117,24 @@ class Config:
                 "server_id": self.server_id,
                 "port": self.port,
                 "watch_clipboard": self.watch_clipboard,
+                "watch_text": self.watch_text,
+                **self.limits,
                 "hotkey": self.hotkey,
                 "devices": self.devices,
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, indent=2), "utf-8")
             tmp.replace(self.path)
+
+    def set_limits(self, values):
+        """Update storage limits from {"keep_days"|"max_items"|"max_mb": number}; invalid values are ignored."""
+        for name, value in values.items():
+            if name not in STORAGE_LIMITS:
+                continue
+            try:
+                self.limits[name] = max(0, min(STORAGE_LIMITS[name][1], int(value)))
+            except (TypeError, ValueError):
+                pass
 
     def device_for_token(self, token):
         if not token:
@@ -133,6 +165,15 @@ class Config:
             return len(self.devices) != before
 
 
+def describe_limits(limits):
+    parts = [
+        f"{limits['keep_days']} day(s)" if limits["keep_days"] else "no time limit",
+        f"newest {limits['max_items']} items" if limits["max_items"] else "no item limit",
+        f"up to {limits['max_mb']} MB" if limits["max_mb"] else "no size limit",
+    ]
+    return ", ".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # Image helpers
 # --------------------------------------------------------------------------- #
@@ -147,6 +188,110 @@ def image_info(data):
         if size:
             return "jpg", size[0], size[1]
     return None
+
+
+IMAGE_FORMAT_NAMES = {
+    "png": "PNG", "jpg": "JPEG", "webp": "WebP", "heic": "HEIC", "avif": "AVIF", "gif": "GIF",
+    "tiff": "TIFF", "bmp": "BMP", "svg": "SVG", "pdf": "PDF", "psd": "Photoshop", "ico": "ICO",
+    "jp2": "JPEG 2000", "tga": "TGA",
+}
+IMAGE_EXTENSIONS = {
+    ".png": "png", ".jpg": "jpg", ".jpeg": "jpg", ".jpe": "jpg", ".webp": "webp", ".heic": "heic",
+    ".heif": "heic", ".hif": "heic", ".avif": "avif", ".gif": "gif", ".tif": "tiff", ".tiff": "tiff", ".bmp": "bmp",
+    ".dib": "bmp", ".svg": "svg", ".pdf": "pdf", ".psd": "psd", ".ico": "ico", ".jp2": "jp2", ".j2k": "jp2",
+    ".tga": "tga",
+}
+# Image files copied in a file manager are imported; PDFs only when copied as image data.
+IMAGE_FILE_EXTENSIONS = set(IMAGE_EXTENSIONS) - {".pdf"}
+# Photos stay JPEG after conversion; PNG would make them several times larger.
+PHOTO_FORMATS = {"heic", "avif", "jp2"}
+UNSUPPORTED_IMAGE = ("This file is not an image Supernote Clipboard can read. Supported: "
+                     + ", ".join(IMAGE_FORMAT_NAMES.values()) + ".")
+
+
+def detect_image_format(data, name=""):
+    """Image format from the file contents (or the file name for formats without a signature)."""
+    head = data[:64]
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8"):
+        return "jpg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head.startswith(b"BM"):
+        return "bmp"
+    if head.startswith((b"II*\x00", b"MM\x00*")):
+        return "tiff"
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"avif", b"avis"):
+            return "avif"
+        if brand in (b"heic", b"heix", b"hevc", b"heim", b"heis", b"mif1", b"msf1"):
+            return "heic"
+    if head.startswith((b"\x00\x00\x00\x0cjP  ", b"\xff\x4f\xff\x51")):
+        return "jp2"
+    if head.startswith(b"8BPS"):
+        return "psd"
+    if head.startswith(b"%PDF"):
+        return "pdf"
+    if head.startswith(b"\x00\x00\x01\x00"):
+        return "ico"
+    if b"<svg" in data[:4096].lower():
+        return "svg"
+    return IMAGE_EXTENSIONS.get(Path(name).suffix.lower()) if name else None
+
+
+def _convert_format(src, dst):
+    """Re-encode src as dst (PNG or JPEG, by suffix) with the platform's image tools."""
+    jpeg = dst.suffix == ".jpg"
+    if SYSTEM == "Darwin":
+        # sips reads WebP, HEIC, AVIF, SVG, PDF (first page), PSD, TGA, ... and uses the first frame of a GIF.
+        cmd = ["sips", "-s", "format", "jpeg" if jpeg else "png"]
+        if jpeg:
+            cmd += ["-s", "formatOptions", "90"]
+        subprocess.run(cmd + [str(src), "--out", str(dst)], capture_output=True, timeout=60)
+    elif SYSTEM == "Windows":
+        # WIC reads what Windows has codecs for (WebP, HEIC and AVIF need the free Store extensions).
+        encoder = "JpegBitmapEncoder" if jpeg else "PngBitmapEncoder"
+        run_powershell(f"""
+Add-Type -AssemblyName PresentationCore
+$in = [System.IO.File]::OpenRead({_ps_quote(src)})
+try {{
+  $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create($in,
+    [System.Windows.Media.Imaging.BitmapCreateOptions]::None, [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+  $encoder = New-Object System.Windows.Media.Imaging.{encoder}
+  $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($decoder.Frames[0]))
+  $out = [System.IO.File]::Create({_ps_quote(dst)})
+  try {{ $encoder.Save($out) }} finally {{ $out.Close() }}
+}} finally {{ $in.Close() }}
+""", timeout=60)
+    else:
+        tool = shutil.which("magick") or shutil.which("convert")
+        if tool:
+            subprocess.run([tool, f"{src}[0]", str(dst)], capture_output=True, timeout=60)
+
+
+def to_supported_image(data, name=""):
+    """Return data as PNG or JPEG (the formats a Supernote note accepts), converting other formats."""
+    fmt = detect_image_format(data, name)
+    if fmt in ("png", "jpg"):
+        return data
+    if not fmt:
+        raise ValueError(UNSUPPORTED_IMAGE)
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / f"in.{fmt}"
+        dst = Path(tmp) / ("out.jpg" if fmt in PHOTO_FORMATS else "out.png")
+        src.write_bytes(data)
+        try:
+            _convert_format(src, dst)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        converted = dst.read_bytes() if dst.exists() else b""
+    if not image_info(converted):
+        raise ValueError(f"This {IMAGE_FORMAT_NAMES[fmt]} image could not be converted on this computer.")
+    return converted
 
 
 def _jpeg_size(data):
@@ -182,52 +327,129 @@ def run_powershell(script, timeout=30):
     )
 
 
-def resize_image(src, dst, max_width):
-    """Scale src down to max_width pixels wide. Returns True when dst was written."""
-    try:
-        if SYSTEM == "Darwin":
-            subprocess.run(
-                ["sips", "--resampleWidth", str(max_width), str(src), "--out", str(dst)],
-                capture_output=True, timeout=30,
-            )
-        elif SYSTEM == "Windows":
-            fmt = "Png" if dst.suffix == ".png" else "Jpeg"
-            run_powershell(f"""
+MAC_GRAY_PROFILE = "/System/Library/ColorSync/Profiles/Generic Gray Gamma 2.2 Profile.icc"
+
+
+def _sips(src, dst, args):
+    subprocess.run(["sips", *args, str(src), "--out", str(dst)], capture_output=True, timeout=30)
+    return dst.exists() and dst.stat().st_size > 0
+
+
+def _windows_convert(src, dst, max_width, gray):
+    """Resize and, when gray is set, convert to grayscale."""
+    fmt = "Png" if dst.suffix == ".png" else "Jpeg"
+    gray_matrix = """
+$cm.Matrix00 = 0.299; $cm.Matrix01 = 0.299; $cm.Matrix02 = 0.299
+$cm.Matrix10 = 0.587; $cm.Matrix11 = 0.587; $cm.Matrix12 = 0.587
+$cm.Matrix20 = 0.114; $cm.Matrix21 = 0.114; $cm.Matrix22 = 0.114
+""" if gray else ""
+    run_powershell(f"""
 Add-Type -AssemblyName System.Drawing
 $src = [System.Drawing.Image]::FromFile({_ps_quote(src)})
-$w = {int(max_width)}
+$w = {int(max_width) if max_width else "$src.Width"}
 $h = [int][Math]::Round($src.Height * $w / $src.Width)
 $bmp = New-Object System.Drawing.Bitmap $w, $h
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-$g.DrawImage($src, 0, 0, $w, $h)
+$cm = New-Object System.Drawing.Imaging.ColorMatrix
+{gray_matrix}
+$attr = New-Object System.Drawing.Imaging.ImageAttributes
+$attr.SetColorMatrix($cm)
+$rect = New-Object System.Drawing.Rectangle 0, 0, $w, $h
+$g.DrawImage($src, $rect, 0, 0, $src.Width, $src.Height, [System.Drawing.GraphicsUnit]::Pixel, $attr)
 $g.Dispose(); $src.Dispose()
 $bmp.Save({_ps_quote(dst)}, [System.Drawing.Imaging.ImageFormat]::{fmt})
 $bmp.Dispose()
 """)
+    return dst.exists() and dst.stat().st_size > 0
+
+
+def convert_image(src, dst, max_width=None, gray=False):
+    """Write src to dst, scaled down to max_width pixels wide and/or converted to grayscale.
+
+    Returns True when dst was written. The picture is resized first, then converted to grayscale.
+    """
+    scaled = None
+    try:
+        if SYSTEM == "Darwin":
+            source = src
+            if max_width:
+                scaled = dst.with_name(dst.stem + "-scaled" + dst.suffix)
+                if not _sips(src, scaled, ["--resampleWidth", str(int(max_width))]):
+                    return False
+                source = scaled
+            if gray:
+                if not _sips(source, dst, ["--matchTo", MAC_GRAY_PROFILE]):
+                    return False
+            elif scaled is not None:
+                scaled.replace(dst)
+                scaled = None
+            else:
+                _sips(src, dst, [])
+        elif SYSTEM == "Windows":
+            source = src
+            if max_width:
+                scaled = dst.with_name(dst.stem + "-scaled" + dst.suffix)
+                if not _windows_convert(src, scaled, max_width, gray=False):
+                    return False
+                source = scaled
+            if gray:
+                if not _windows_convert(source, dst, None, gray=True):
+                    return False
+            elif scaled is not None:
+                scaled.replace(dst)
+                scaled = None
+            else:
+                _windows_convert(src, dst, None, gray=False)
         else:
             tool = shutil.which("magick") or shutil.which("convert")
             if not tool:
                 return False
-            subprocess.run([tool, str(src), "-resize", f"{int(max_width)}x", str(dst)],
-                           capture_output=True, timeout=30)
+            source = src
+            if max_width:
+                scaled = dst.with_name(dst.stem + "-scaled" + dst.suffix)
+                subprocess.run(
+                    [tool, str(src), "-resize", f"{int(max_width)}x", str(scaled)],
+                    capture_output=True, timeout=30,
+                )
+                if not (scaled.exists() and scaled.stat().st_size > 0):
+                    return False
+                source = scaled
+            if gray:
+                subprocess.run([tool, str(source), "-colorspace", "Gray", str(dst)], capture_output=True, timeout=30)
+            elif scaled is not None:
+                scaled.replace(dst)
+                scaled = None
+            else:
+                subprocess.run([tool, str(src), str(dst)], capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return False
+    finally:
+        if scaled is not None and scaled.exists():
+            scaled.unlink()
     return dst.exists() and dst.stat().st_size > 0
 
 
 # --------------------------------------------------------------------------- #
-# Screenshot store
+# Clipboard item store
 # --------------------------------------------------------------------------- #
 
-class ShotStore:
-    def __init__(self, directory, limit=MAX_SHOTS):
+def normalize_text(text):
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return text[:MAX_TEXT_CHARS] if text.strip() else ""
+
+
+class ClipStore:
+    """Images and text waiting to be pasted on a Supernote, newest first."""
+
+    def __init__(self, directory, limits):
         self.dir = directory
         self.cache_dir = directory / "cache"
         self.index_path = directory / "index.json"
-        self.limit = limit
+        self.limits = limits  # shared with Config, see STORAGE_LIMITS
         self.lock = threading.RLock()
         self.shots = []
+        self.usage = 0
         self.revision = 0
         self.dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(exist_ok=True)
@@ -241,6 +463,7 @@ class ShotStore:
         except (OSError, ValueError):
             return
         for entry in entries:
+            entry.setdefault("kind", "image")
             if SHOT_ID_RE.match(str(entry.get("id", ""))) and self._file(entry).exists():
                 self.shots.append(entry)
 
@@ -253,47 +476,121 @@ class ShotStore:
     def _file(self, shot):
         return self.dir / f"{shot['id']}.{shot['ext']}"
 
-    def _remove_files(self, shot):
-        self._file(shot).unlink(missing_ok=True)
-        for cached in self.cache_dir.glob(f"{shot['id']}_w*"):
-            cached.unlink(missing_ok=True)
+    def _files(self, shot):
+        return [self._file(shot), *self.cache_dir.glob(f"{shot['id']}_*")]
 
-    def add(self, data, source):
+    def _remove_files(self, shot):
+        for path in self._files(shot):
+            path.unlink(missing_ok=True)
+
+    def _bytes(self, shot):
+        """Disk space of an item, including the scaled copies made for the Supernote."""
+        total = 0
+        for path in self._files(shot):
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass
+        return total
+
+    def _insert(self, item, data, digest):
+        """Store a new item, or move an identical one back to the top. Returns (item, is_new)."""
+        with self.lock:
+            for existing in self.shots:
+                if existing["sha1"] == digest:
+                    existing["createdAt"] = item["createdAt"]
+                    self.promote(existing["id"])
+                    return existing, False
+            self._file(item).write_bytes(data)
+            self.shots.insert(0, item)
+            self._save()
+            self.prune()
+        return item, True
+
+    @staticmethod
+    def _new_item(kind, ext, source, digest, **extra):
+        return {
+            "id": time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2),
+            "kind": kind,
+            "ext": ext,
+            "createdAt": int(time.time() * 1000),
+            "source": source,
+            "sha1": digest,
+            **extra,
+        }
+
+    def add(self, data, source, name=""):
+        """Add an image in any format detect_image_format knows; name helps for formats without a signature."""
+        digest = hashlib.sha1(data).hexdigest()
+        data = to_supported_image(data, name)
         info = image_info(data)
         if not info:
-            raise ValueError("Only PNG and JPEG images are supported.")
+            raise ValueError(UNSUPPORTED_IMAGE)
         ext, width, height = info
-        digest = hashlib.sha1(data).hexdigest()
-        with self.lock:
-            for shot in self.shots:
-                if shot["sha1"] == digest:
-                    self.promote(shot["id"])
-                    return shot
-            shot = {
-                "id": time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2),
-                "ext": ext,
-                "width": width,
-                "height": height,
-                "createdAt": int(time.time() * 1000),
-                "source": source,
-                "sha1": digest,
-            }
-            self._file(shot).write_bytes(data)
-            self.shots.insert(0, shot)
-            for old in self.shots[self.limit:]:
-                self._remove_files(old)
-            del self.shots[self.limit:]
-            self._save()
-        log(f"New screenshot {shot['id']} ({width}x{height}, from {source})")
+        shot, is_new = self._insert(
+            self._new_item("image", ext, source, digest, width=width, height=height), data, digest)
+        if is_new:
+            log(f"New image {shot['id']} ({width}x{height}, from {source})")
         return shot
 
-    def list(self):
-        with self.lock:
-            return [dict(s) for s in self.shots]
+    def add_text(self, text, source):
+        text = normalize_text(text)
+        if not text:
+            raise ValueError("The text is empty.")
+        data = text.encode("utf-8")
+        digest = hashlib.sha1(b"text:" + data).hexdigest()
+        item, is_new = self._insert(
+            self._new_item("text", "txt", source, digest, width=0, height=0, chars=len(text),
+                           preview=text[:280]), data, digest)
+        if is_new:
+            log(f"New text {item['id']} ({len(text)} characters, from {source})")
+        return item
 
-    def latest(self):
+    def prune(self):
+        """Apply the storage limits, oldest items first. The size limit never deletes the newest item."""
+        keep_days, max_items, max_mb = (self.limits[k] for k in ("keep_days", "max_items", "max_mb"))
+        removed = {"age": 0, "count": 0, "size": 0}
         with self.lock:
-            return dict(self.shots[0]) if self.shots else None
+            kept = list(self.shots)
+            if keep_days:
+                cutoff = (time.time() - keep_days * 86400) * 1000
+                fresh = [s for s in kept if s["createdAt"] >= cutoff]
+                removed["age"] = len(kept) - len(fresh)
+                kept = fresh
+            if max_items and len(kept) > max_items:
+                removed["count"] = len(kept) - max_items
+                kept = kept[:max_items]
+            sizes = [self._bytes(s) for s in kept]
+            if max_mb:
+                while len(kept) > 1 and sum(sizes) > max_mb * 1024 * 1024:
+                    kept.pop()
+                    sizes.pop()
+                    removed["size"] += 1
+            if len(kept) != len(self.shots):
+                kept_ids = {s["id"] for s in kept}
+                for shot in self.shots:
+                    if shot["id"] not in kept_ids:
+                        self._remove_files(shot)
+                self.shots = kept
+                self._save()
+            self.usage = sum(sizes)
+        reasons = {
+            "age": f"older than {keep_days} day(s)",
+            "count": f"beyond the newest {max_items}",
+            "size": f"over {max_mb} MB",
+        }
+        for key, count in removed.items():
+            if count:
+                log(f"Deleted {count} item(s) {reasons[key]}.")
+        return sum(removed.values())
+
+    def list(self, kinds=("image",)):
+        with self.lock:
+            return [dict(s) for s in self.shots if s["kind"] in kinds]
+
+    def latest(self, kinds=("image",)):
+        items = self.list(kinds)
+        return items[0] if items else None
 
     def get(self, shot_id):
         with self.lock:
@@ -318,6 +615,7 @@ class ShotStore:
                     self._remove_files(shot)
                     del self.shots[i]
                     self._save()
+                    self.usage = sum(self._bytes(s) for s in self.shots)
                     return True
         return False
 
@@ -326,23 +624,62 @@ class ShotStore:
             for shot in self.shots:
                 self._remove_files(shot)
             self.shots = []
+            self.usage = 0
             self._save()
 
-    def read(self, shot, max_width=None):
-        """Return image bytes, scaled down to max_width when the original is wider."""
+    def read(self, shot, max_width=None, gray=False):
+        """Return image bytes, scaled down to max_width when the original is wider, optionally grayscale."""
         src = self._file(shot)
-        if max_width and shot["width"] > max_width:
-            cached = self.cache_dir / f"{shot['id']}_w{max_width}.{shot['ext']}"
-            if cached.exists() or resize_image(src, cached, max_width):
-                return cached.read_bytes()
+        if max_width and shot["width"] <= max_width:
+            max_width = None
+        if not max_width and not gray:
+            return src.read_bytes()
+        suffix = (f"_w{max_width}" if max_width else "") + ("_g100" if gray else "")
+        cached = self.cache_dir / f"{shot['id']}{suffix}.{shot['ext']}"
+        if cached.exists() or convert_image(src, cached, max_width, gray):
+            return cached.read_bytes()
         return src.read_bytes()
+
+    def read_text(self, item):
+        return self._file(item).read_text("utf-8")
 
 
 # --------------------------------------------------------------------------- #
 # Clipboard access
 # --------------------------------------------------------------------------- #
 
+URL_RE = re.compile(r"^(https?|file)://\S+$")
+
+
+def prefer_image(has_image, text):
+    """Copying a picture in a browser also puts its address on the clipboard; anything else with text is text."""
+    if not text or not text.strip():
+        return has_image
+    return has_image and bool(URL_RE.match(text.strip()))
+
+
+def is_image_file(path):
+    """By extension, or by content for unusual ones (cameras use .HIF, .JFIF, ...)."""
+    if path.suffix.lower() in IMAGE_FILE_EXTENSIONS:
+        return True
+    try:
+        with open(path, "rb") as f:
+            fmt = detect_image_format(f.read(4096))
+    except OSError:
+        return False
+    return fmt not in (None, "pdf")
+
+
+def image_files(paths):
+    return [p for p in paths if p.is_file() and is_image_file(p)]
+
+
 class MacClipboard:
+    """Reads the general pasteboard.
+
+    read() returns ("image", bytes in any image format), ("files", [image paths]), ("text", str) or None.
+    """
+
     _EXPORT_SCRIPT = (
         'on run argv\n'
         '  set png to the clipboard as \u00abclass PNGf\u00bb\n'
@@ -352,33 +689,122 @@ class MacClipboard:
         '  close access fh\n'
         'end run\n'
     )
+    # Markers password managers and clipboard tools put on secrets (see nspasteboard.org).
+    _CONCEALED_TYPES = {
+        "org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType",
+        "org.nspasteboard.AutoGeneratedType", "com.agilebits.onepassword",
+    }
+    # In order of preference: apps usually add a TIFF next to the original format, and PDF for vector art.
+    _IMAGE_TYPES = (
+        "public.png", "public.jpeg", "org.webmproject.webp", "public.heic", "public.heif", "public.avif",
+        "com.compuserve.gif", "public.tiff", "com.microsoft.bmp", "public.jpeg-2000",
+        "com.adobe.photoshop-image", "com.microsoft.ico", "public.svg-image", "com.adobe.pdf",
+    )
+    _TEXT_TYPE = "public.utf8-plain-text"
+    _FILE_TYPE = "public.file-url"
 
     def __init__(self):
-        self._change_count = None
+        self._objc = None
         try:
             objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
             ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AppKit.framework/AppKit")
-            objc.objc_getClass.restype = ctypes.c_void_p
+            void_p = ctypes.c_void_p
+            objc.objc_getClass.restype = void_p
             objc.objc_getClass.argtypes = [ctypes.c_char_p]
-            objc.sel_registerName.restype = ctypes.c_void_p
+            objc.sel_registerName.restype = void_p
             objc.sel_registerName.argtypes = [ctypes.c_char_p]
-            send_ptr = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(
-                ("objc_msgSend", objc))
-            send_long = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(
-                ("objc_msgSend", objc))
-            board = send_ptr(objc.objc_getClass(b"NSPasteboard"),
-                             objc.sel_registerName(b"generalPasteboard"))
-            selector = objc.sel_registerName(b"changeCount")
-            if board:
-                self._change_count = lambda: send_long(board, selector)
+            objc.objc_autoreleasePoolPush.restype = void_p
+            objc.objc_autoreleasePoolPop.argtypes = [void_p]
+
+            def message(restype, *argtypes):
+                return ctypes.CFUNCTYPE(restype, void_p, void_p, *argtypes)(("objc_msgSend", objc))
+
+            self._send = message(void_p)
+            self._send_long = message(ctypes.c_long)
+            self._send_index = message(void_p, ctypes.c_ulong)
+            self._send_obj = message(void_p, void_p)
+            self._send_cstr = message(void_p, ctypes.c_char_p)
+            self._send_utf8 = message(ctypes.c_char_p)
+            self._sel = lambda name: objc.sel_registerName(name.encode())
+            self._nsstring = objc.objc_getClass(b"NSString")
+            self._board = self._send(objc.objc_getClass(b"NSPasteboard"), self._sel("generalPasteboard"))
+            if self._board:
+                self._objc = objc
         except (OSError, AttributeError, TypeError):
-            self._change_count = None
+            self._objc = None
 
     def change_token(self):
-        if self._change_count:
-            return self._change_count()
+        if self._objc:
+            return self._send_long(self._board, self._sel("changeCount"))
         out = subprocess.run(["osascript", "-e", "clipboard info"], capture_output=True, timeout=10)
         return out.stdout
+
+    def _utf8(self, nsstring):
+        raw = self._send_utf8(nsstring, self._sel("UTF8String")) if nsstring else None
+        return raw.decode("utf-8", "replace") if raw is not None else None
+
+    def _types(self):
+        array = self._send(self._board, self._sel("types"))
+        count = self._send_long(array, self._sel("count")) if array else 0
+        return {self._utf8(self._send_index(array, self._sel("objectAtIndex:"), i)) for i in range(count)}
+
+    def _key(self, uti):
+        return self._send_cstr(self._nsstring, self._sel("stringWithUTF8String:"), uti.encode())
+
+    def _string(self, uti):
+        return self._utf8(self._send_obj(self._board, self._sel("stringForType:"), self._key(uti)))
+
+    def _data(self, uti):
+        nsdata = self._send_obj(self._board, self._sel("dataForType:"), self._key(uti))
+        length = self._send_long(nsdata, self._sel("length")) if nsdata else 0
+        pointer = self._send(nsdata, self._sel("bytes")) if length else None
+        return ctypes.string_at(pointer, length) if pointer else None
+
+    def _file_paths(self):
+        """Every file copied in Finder (one pasteboard item each)."""
+        items = self._send(self._board, self._sel("pasteboardItems"))
+        count = self._send_long(items, self._sel("count")) if items else 0
+        key = self._key(self._FILE_TYPE)
+        nsurl = self._objc.objc_getClass(b"NSURL")
+        paths = []
+        for i in range(count):
+            item = self._send_index(items, self._sel("objectAtIndex:"), i)
+            url = self._send_obj(item, self._sel("stringForType:"), key)
+            # Finder copies file reference URLs (file:///.file/id=...); filePathURL turns them into paths.
+            url = self._send_obj(nsurl, self._sel("URLWithString:"), url) if url else None
+            url = self._send(url, self._sel("filePathURL")) if url else None
+            path = self._utf8(self._send(url, self._sel("path"))) if url else None
+            if path:
+                paths.append(Path(path))
+        return paths
+
+    def read(self, want_image=True, want_text=True):
+        if not self._objc:
+            # Without the pasteboard types, secrets cannot be told apart from text: images only.
+            data = self.read_image() if want_image else None
+            return ("image", data) if data else None
+        pool = self._objc.objc_autoreleasePoolPush()
+        try:
+            types = self._types()
+            if types & self._CONCEALED_TYPES:
+                return None
+            text = self._string(self._TEXT_TYPE) if self._TEXT_TYPE in types else None
+            # Files copied in Finder also put their names and icons on the clipboard, which are not wanted.
+            files = self._file_paths() if self._FILE_TYPE in types else []
+            image_type = next((t for t in self._IMAGE_TYPES if t in types), None)
+            data = None
+            if not files and want_image and prefer_image(image_type is not None, text):
+                data = self._data(image_type)
+        finally:
+            self._objc.objc_autoreleasePoolPop(pool)
+
+        if files:
+            images = image_files(files)
+            return ("files", images) if want_image and images else None
+        if prefer_image(image_type is not None, text):
+            data = data or (self.read_image() if want_image else None)
+            return ("image", data) if data else None
+        return ("text", text) if text and want_text else None
 
     def read_image(self):
         fd, path = tempfile.mkstemp(suffix=".png")
@@ -393,11 +819,88 @@ class MacClipboard:
 
 
 class WindowsClipboard:
+    CF_BITMAP = 2
+    CF_DIB = 8
+    CF_UNICODETEXT = 13
+    CF_HDROP = 15
+    # Formats password managers add so clipboard tools leave the content alone.
+    _PRIVATE_FORMATS = ("ExcludeClipboardContentFromMonitorProcessing", "Clipboard Viewer Ignore")
+
     def __init__(self):
-        self._user32 = ctypes.windll.user32
+        void_p = ctypes.c_void_p
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        user32.OpenClipboard.argtypes = [void_p]
+        user32.GetClipboardData.argtypes = [ctypes.c_uint]
+        user32.GetClipboardData.restype = void_p
+        user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
+        user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
+        user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+        kernel32.GlobalLock.argtypes = [void_p]
+        kernel32.GlobalLock.restype = void_p
+        kernel32.GlobalUnlock.argtypes = [void_p]
+        shell32 = ctypes.windll.shell32
+        shell32.DragQueryFileW.argtypes = [void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+        shell32.DragQueryFileW.restype = ctypes.c_uint
+        self._user32, self._kernel32, self._shell32 = user32, kernel32, shell32
+        self._private = [user32.RegisterClipboardFormatW(name) for name in self._PRIVATE_FORMATS]
 
     def change_token(self):
         return self._user32.GetClipboardSequenceNumber()
+
+    def _has(self, fmt):
+        return bool(fmt and self._user32.IsClipboardFormatAvailable(fmt))
+
+    def _open(self):
+        for _ in range(10):  # another program may hold the clipboard for a moment
+            if self._user32.OpenClipboard(None):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _read_text(self):
+        if not self._open():
+            return None
+        try:
+            handle = self._user32.GetClipboardData(self.CF_UNICODETEXT)
+            pointer = self._kernel32.GlobalLock(handle) if handle else None
+            if not pointer:
+                return None
+            try:
+                return ctypes.wstring_at(pointer)
+            finally:
+                self._kernel32.GlobalUnlock(handle)
+        finally:
+            self._user32.CloseClipboard()
+
+    def _read_files(self):
+        """Files copied in Explorer."""
+        if not self._open():
+            return []
+        try:
+            handle = self._user32.GetClipboardData(self.CF_HDROP)
+            if not handle:
+                return []
+            paths = []
+            for i in range(self._shell32.DragQueryFileW(handle, 0xFFFFFFFF, None, 0)):
+                size = self._shell32.DragQueryFileW(handle, i, None, 0) + 1
+                buffer = ctypes.create_unicode_buffer(size)
+                self._shell32.DragQueryFileW(handle, i, buffer, size)
+                paths.append(Path(buffer.value))
+            return paths
+        finally:
+            self._user32.CloseClipboard()
+
+    def read(self, want_image=True, want_text=True):
+        if any(self._has(fmt) for fmt in self._private):
+            return None
+        if self._has(self.CF_HDROP):
+            images = image_files(self._read_files())
+            return ("files", images) if want_image and images else None
+        text = self._read_text() if self._has(self.CF_UNICODETEXT) else None
+        if prefer_image(self._has(self.CF_DIB) or self._has(self.CF_BITMAP), text):
+            data = self.read_image() if want_image else None
+            return ("image", data) if data else None
+        return ("text", text) if text and want_text else None
 
     def read_image(self):
         fd, path = tempfile.mkstemp(suffix=".png")
@@ -417,27 +920,49 @@ $img.Save({_ps_quote(path)}, [System.Drawing.Imaging.ImageFormat]::Png)
 
 
 class LinuxClipboard:
+    _TEXT_TYPES = ("text/plain;charset=utf-8", "UTF8_STRING", "text/plain")
+    _IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/avif", "image/heic",
+                    "image/tiff", "image/bmp", "image/svg+xml")
+    _SKIP_TYPES = {"x-kde-passwordManagerHint", "x-special/gnome-copied-files"}
+
     def __init__(self):
         if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-paste"):
             self._types_cmd = ["wl-paste", "--list-types"]
-            self._read_cmd = ["wl-paste", "--no-newline", "--type", "image/png"]
+            self._read_cmd = lambda mime: ["wl-paste", "--no-newline", "--type", mime]
         elif shutil.which("xclip"):
             self._types_cmd = ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"]
-            self._read_cmd = ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]
+            self._read_cmd = lambda mime: ["xclip", "-selection", "clipboard", "-t", mime, "-o"]
         else:
             raise RuntimeError("Install wl-clipboard (Wayland) or xclip (X11) for clipboard import.")
         self._last = None
 
-    def change_token(self):
-        types = subprocess.run(self._types_cmd, capture_output=True, timeout=5).stdout
-        if b"image/png" not in types:
-            self._last = None
-            return b""
-        self._last = subprocess.run(self._read_cmd, capture_output=True, timeout=10).stdout
-        return hashlib.sha1(self._last).digest()
+    def _fetch(self, mime):
+        return subprocess.run(self._read_cmd(mime), capture_output=True, timeout=10).stdout
 
-    def read_image(self):
-        return self._last or None
+    def _snapshot(self):
+        types = set(subprocess.run(self._types_cmd, capture_output=True, timeout=5).stdout
+                    .decode("utf-8", "replace").split())
+        if types & self._SKIP_TYPES:
+            return None
+        mime = next((t for t in self._TEXT_TYPES if t in types), None)
+        text = self._fetch(mime).decode("utf-8", "replace") if mime else None
+        image_type = next((t for t in self._IMAGE_TYPES if t in types), None)
+        if prefer_image(image_type is not None, text):
+            data = self._fetch(image_type)
+            return ("image", data) if data else None
+        return ("text", text) if text else None
+
+    def change_token(self):
+        self._last = self._snapshot()
+        if not self._last:
+            return b""
+        kind, value = self._last
+        return kind.encode() + hashlib.sha1(value if kind == "image" else value.encode()).digest()
+
+    def read(self, want_image=True, want_text=True):
+        if not self._last:
+            return None
+        return self._last if (want_image if self._last[0] == "image" else want_text) else None
 
 
 def make_clipboard():
@@ -455,6 +980,14 @@ class ClipboardWatcher(threading.Thread):
         self.interval = interval
         self.clipboard = make_clipboard()
 
+    def _add_files(self, paths):
+        for path in paths[:MAX_FILES_PER_COPY]:
+            try:
+                if path.is_file() and path.stat().st_size <= MAX_UPLOAD_BYTES:
+                    self.app.store.add(path.read_bytes(), "file", path.name)
+            except (OSError, ValueError) as exc:
+                log(f"Skipped {path.name}: {exc}")
+
     def run(self):
         try:
             last = self.clipboard.change_token()
@@ -468,11 +1001,19 @@ class ClipboardWatcher(threading.Thread):
                 if token == last:
                     continue
                 last = token
-                if not self.app.config.watch_clipboard:
+                config = self.app.config
+                if not (config.watch_clipboard or config.watch_text):
                     continue
-                data = self.clipboard.read_image()
-                if data and image_info(data):
-                    self.app.store.add(data, "clipboard")
+                clip = self.clipboard.read(config.watch_clipboard, config.watch_text)
+                if not clip:
+                    continue
+                kind, value = clip
+                if kind == "image":
+                    self.app.store.add(value, "clipboard")
+                elif kind == "files":
+                    self._add_files(value)
+                elif kind == "text" and normalize_text(value):
+                    self.app.store.add_text(value, "clipboard")
             except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 log(f"Clipboard read failed: {exc}")
 
@@ -811,7 +1352,7 @@ class App:
         def worker():
             try:
                 shot = capture_region(self)
-                self.message = "Screenshot ready. Tap \"Paste screenshot\" on your Supernote." if shot \
+                self.message = "Screenshot ready. Tap \"Paste from PC\" on your Supernote." if shot \
                     else "Capture cancelled."
             except Exception as exc:  # noqa: BLE001 - shown to the user in the web UI
                 self.message = f"Capture failed: {exc}"
@@ -833,19 +1374,35 @@ class App:
             "pendingPairs": self.pending_pairs(),
             "devices": [{k: d[k] for k in ("id", "name", "pairedAt")} for d in self.config.devices],
             "watchClipboard": self.config.watch_clipboard,
+            "watchText": self.config.watch_text,
+            "limits": dict(self.config.limits),
+            "usageBytes": self.store.usage,
             "capturing": self.capturing,
             "hotkey": self.hotkey,
             "message": self.message,
             "revision": self.store.revision,
-            "shots": [public_shot(s) for s in self.store.list()],
+            "shots": [public_shot(s) for s in self.store.list(ALL_KINDS)],
         }
 
 
+ALL_KINDS = ("image", "text")
+
+
 def public_shot(shot):
-    return {k: shot[k] for k in ("id", "ext", "width", "height", "createdAt", "source")}
+    keys = ("id", "kind", "ext", "width", "height", "createdAt", "source")
+    if shot["kind"] == "text":
+        keys += ("chars", "preview")
+    return {k: shot[k] for k in keys}
+
+
+def requested_kinds(query):
+    """Plugins before 1.3 only understand images, so text is only listed when asked for."""
+    kinds = tuple(k for k in query.get("kinds", ["image"])[0].split(",") if k in ALL_KINDS)
+    return kinds or ("image",)
 
 
 SHOT_PATH_RE = re.compile(r"^/(api|local)/shots/(\d{8}-\d{6}-[0-9a-f]{4})\.(png|jpg)$")
+TEXT_PATH_RE = re.compile(r"^/api/text/(\d{8}-\d{6}-[0-9a-f]{4})$")
 PAIR_PATH_RE = re.compile(r"^/api/pair/([A-Za-z0-9_-]{16,64})$")
 
 
@@ -895,15 +1452,15 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status, message):
         self._json({"error": message}, status)
 
-    def _send_shot(self, shot_id, query):
+    def _send_shot(self, shot_id, query, gray):
         shot = self.app.store.get(shot_id)
-        if not shot:
+        if not shot or shot["kind"] != "image":
             return self._error(404, "Screenshot not found.")
         max_width = None
         raw = query.get("maxWidth", [""])[0]
         if raw.isdigit() and 50 <= int(raw) <= 10000:
             max_width = int(raw)
-        data = self.app.store.read(shot, max_width)
+        data = self.app.store.read(shot, max_width, gray)
         ctype = "image/png" if shot["ext"] == "png" else "image/jpeg"
         self._send(200, data, ctype)
 
@@ -944,15 +1501,22 @@ class Handler(BaseHTTPRequestHandler):
             if not device:
                 return self._error(401, "This Supernote is not paired with this computer.")
             if path == "/api/latest":
-                shot = app.store.latest()
+                shot = app.store.latest(requested_kinds(query))
                 if not shot:
-                    return self._error(404, "No screenshots yet. Take one on your computer first.")
+                    return self._error(404, "Nothing copied yet. Take a screenshot on your computer first.")
                 return self._json({"shot": public_shot(shot)})
             if path == "/api/shots":
-                return self._json({"shots": [public_shot(s) for s in app.store.list()]})
+                return self._json({"shots": [public_shot(s) for s in app.store.list(requested_kinds(query))]})
             match = SHOT_PATH_RE.match(path)
             if match and match.group(1) == "api":
-                return self._send_shot(match.group(2), query)
+                # The Supernote screen is grayscale; converting here keeps the files small.
+                return self._send_shot(match.group(2), query, gray=True)
+            match = TEXT_PATH_RE.match(path)
+            if match:
+                item = app.store.get(match.group(1))
+                if not item or item["kind"] != "text":
+                    return self._error(404, "This text was deleted on your computer.")
+                return self._json({"text": app.store.read_text(item)})
             return self._error(404, "Not found.")
 
         if not self._is_local():
@@ -964,7 +1528,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(app.state())
         match = SHOT_PATH_RE.match(path)
         if match and match.group(1) == "local":
-            return self._send_shot(match.group(2), query)
+            return self._send_shot(match.group(2), query, gray=False)
         return self._error(404, "Not found.")
 
     def do_POST(self):
@@ -990,9 +1554,17 @@ class Handler(BaseHTTPRequestHandler):
             data = self._read_body(MAX_UPLOAD_BYTES)
             if not data:
                 return self._error(400, "Empty or too large upload.")
+            name = urllib.parse.unquote(self.headers.get("X-SN-Filename", ""))[:200]
             try:
-                shot = app.store.add(data, "upload")
+                shot = app.store.add(data, "upload", name)
             except ValueError as exc:
+                return self._error(400, str(exc))
+            return self._json({"shot": public_shot(shot)})
+        if path == "/local/text":
+            data = self._read_body(MAX_TEXT_CHARS * 4)
+            try:
+                shot = app.store.add_text(data.decode("utf-8") if data else "", "upload")
+            except (UnicodeDecodeError, ValueError) as exc:
                 return self._error(400, str(exc))
             return self._json({"shot": public_shot(shot)})
 
@@ -1015,6 +1587,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/local/settings":
             if "watchClipboard" in payload:
                 app.config.watch_clipboard = bool(payload["watchClipboard"])
+            if "watchText" in payload:
+                app.config.watch_text = bool(payload["watchText"])
+            if isinstance(payload.get("limits"), dict):
+                app.config.set_limits(payload["limits"])
+                app.store.prune()
             app.config.save()
             return self._json({"ok": True})
         if path in ("/local/pair/allow", "/local/pair/deny"):
@@ -1037,6 +1614,15 @@ def exit_with_parent():
     threading.Thread(target=watch, daemon=True, name="parent-watch").start()
 
 
+def start_pruning(store, interval=600):
+    def loop():
+        while True:
+            time.sleep(interval)
+            store.prune()
+
+    threading.Thread(target=loop, daemon=True, name="prune").start()
+
+
 def serve(args):
     if args.app:
         args.no_browser = True
@@ -1051,7 +1637,13 @@ def serve(args):
     if args.hotkey is not None:
         config.hotkey = "" if args.hotkey.lower() in ("", "off", "none") else args.hotkey
         config.save()
-    app = App(config, ShotStore(DATA_DIR / "shots"))
+    limit_args = {name: getattr(args, name) for name in STORAGE_LIMITS if getattr(args, name) is not None}
+    if limit_args:
+        config.set_limits(limit_args)
+        config.save()
+    store = ClipStore(DATA_DIR / "shots", config.limits)
+    store.prune()
+    app = App(config, store)
     Handler.app = app
     Handler.verbose = args.verbose
 
@@ -1066,6 +1658,7 @@ def serve(args):
         ClipboardWatcher(app).start()
     except (RuntimeError, OSError) as exc:
         log(f"Clipboard import unavailable: {exc}")
+    start_pruning(store)
     mac_hotkey = register_hotkey(app)
 
     local_url = app.local_url
@@ -1076,6 +1669,7 @@ def serve(args):
     print(f"  Capture:      {capture}")
     print(f"  Network:      {addresses}")
     print(f"  Paired:       {len(config.devices)} Supernote(s)")
+    print(f"  Keeps:        {describe_limits(config.limits)}")
     print(f"  Data folder:  {DATA_DIR}\n  Press Ctrl+C to quit.\n", flush=True)
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(local_url)).start()
@@ -1091,14 +1685,14 @@ def serve(args):
         server.server_close()
 
 
-def call_running_instance(path, body, content_type="application/json"):
+def call_running_instance(path, body, content_type="application/json", headers=None):
     config = Config(DATA_DIR / "config.json")
     request = urllib.request.Request(
         f"http://127.0.0.1:{config.port}{path}", data=body, method="POST",
-        headers={"X-SN-Local": "1", "Content-Type": content_type},
+        headers={"X-SN-Local": "1", "Content-Type": content_type, **(headers or {})},
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
             return json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as exc:
         sys.exit(f"Error: {json.loads(exc.read() or b'{}').get('error', exc)}")
@@ -1114,6 +1708,12 @@ def main():
         p.add_argument("--port", type=int, help=f"port to listen on (default {DEFAULT_PORT})")
         p.add_argument("--no-browser", action="store_true", help="do not open the window in a browser")
         p.add_argument("--no-watch", action="store_true", help="do not import screenshots from the clipboard")
+        p.add_argument("--keep-days", type=int, metavar="N",
+                       help=f"delete items after N days, 0 = no limit (default {STORAGE_LIMITS['keep_days'][0]})")
+        p.add_argument("--max-items", type=int, metavar="N",
+                       help=f"keep only the newest N items, 0 = no limit (default {STORAGE_LIMITS['max_items'][0]})")
+        p.add_argument("--max-mb", type=int, metavar="N",
+                       help="delete the oldest items when they use more than N MB, 0 = no limit (default)")
         p.add_argument("--hotkey", metavar="KEYS",
                        help=f"global capture shortcut, e.g. ctrl+shift+2, or 'off' (default {DEFAULT_HOTKEY or 'off'})")
         p.add_argument("--verbose", action="store_true", help="log every request")
@@ -1127,7 +1727,8 @@ def main():
         result = call_running_instance("/local/capture", b"{}")
         print("Select a region on your screen." if result.get("started") else "A capture is already running.")
     elif args.command == "add":
-        result = call_running_instance("/local/upload", args.file.read_bytes(), "application/octet-stream")
+        result = call_running_instance("/local/upload", args.file.read_bytes(), "application/octet-stream",
+                                       {"X-SN-Filename": urllib.parse.quote(args.file.name)})
         print(f"Added {result['shot']['id']}.")
     else:
         serve(args)
@@ -1176,6 +1777,9 @@ INDEX_HTML = r"""<!doctype html>
   .shot .thumb { height:160px; display:flex; align-items:center; justify-content:center; background:#fafafa;
                  border-bottom:1px solid var(--line); }
   .shot img { max-width:100%; max-height:160px; display:block; }
+  .shot .text { align-items:flex-start; justify-content:flex-start; padding:12px; overflow:hidden;
+                white-space:pre-wrap; word-break:break-word; font-size:13px; text-align:left; }
+  select { font:inherit; padding:4px 6px; border-radius:6px; }
   .shot .meta { padding:10px 12px; font-size:13px; color:var(--muted); flex:1; }
   .shot .meta b { color:var(--ink); }
   .shot .actions { display:flex; gap:8px; padding:0 12px 12px; }
@@ -1207,7 +1811,7 @@ INDEX_HTML = r"""<!doctype html>
     <div class="setup">
       <div><div class="label">Computer</div><div class="value" id="computer">-</div></div>
       <div style="flex:1; min-width:260px; color:var(--muted)">
-        Nothing to type on your Supernote: open a note and tap <b>Paste screenshot</b>. The first time, it finds this
+        Nothing to type on your Supernote: open a note and tap <b>Paste from PC</b>. The first time, it finds this
         computer on your Wi-Fi and a request appears here &mdash; click <b>Allow</b> once.
         <span id="manual"></span>
       </div>
@@ -1217,17 +1821,32 @@ INDEX_HTML = r"""<!doctype html>
 
   <section class="card">
     <div class="row">
-      <label class="toggle"><input type="checkbox" id="watch"> Auto-import screenshots copied to the clipboard</label>
-      <span style="flex:1"></span>
-      <button id="clear" class="small">Clear all</button>
+      <label class="toggle"><input type="checkbox" id="watch"> Import copied images</label>
+      <label class="toggle"><input type="checkbox" id="watchText"> Import copied text</label>
     </div>
+    <div class="hint" style="margin-top:8px">Passwords copied from password managers are never imported.
+      Nothing is sent anywhere except to your paired Supernote.</div>
     <div class="msg" id="msg"></div>
   </section>
 
-  <div id="drop">Drop an image here, or press <b>Ctrl/Cmd + V</b> to add one from the clipboard.</div>
+  <section class="card">
+    <div class="row">
+      <b>Storage</b>
+      <label class="toggle">Delete after <select id="keep_days"></select></label>
+      <label class="toggle">Keep at most <select id="max_items"></select></label>
+      <label class="toggle">Use at most <select id="max_mb"></select></label>
+      <span style="flex:1"></span>
+      <button id="clear" class="small">Clear all</button>
+    </div>
+    <div class="hint" style="margin-top:8px"><span id="usage"></span> The oldest items are deleted first;
+      the size limit never deletes the newest item.</div>
+  </section>
+
+  <div id="drop">Drop images here (PNG, JPEG, WebP, HEIC, AVIF, GIF, SVG, TIFF, BMP, ...), or press
+    <b>Ctrl/Cmd + V</b> to add an image or text from the clipboard.</div>
 
   <div class="grid" id="grid"></div>
-  <div class="empty" id="empty" hidden>No screenshots yet. Press the capture shortcut, click <b>Capture region</b>, or copy a screenshot.</div>
+  <div class="empty" id="empty" hidden>Nothing yet. Press the capture shortcut, click <b>Capture region</b>, or copy an image or some text.</div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -1244,10 +1863,10 @@ function act(path, id) {
   return post(path, { id }).then(refresh).catch(e => alert(e.message));
 }
 
-async function post(path, body, type) {
+async function post(path, body, type, headers) {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "X-SN-Local": "1", "Content-Type": type || "application/json" },
+    headers: { "X-SN-Local": "1", "Content-Type": type || "application/json", ...(headers || {}) },
     body: type ? body : JSON.stringify(body || {}),
   });
   const data = await res.json().catch(() => ({}));
@@ -1258,6 +1877,48 @@ async function post(path, body, type) {
 function fmtTime(ms) {
   const d = new Date(ms);
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// Storage limit choices; 0 = no limit.
+const LIMITS = {
+  keep_days: { presets: [1, 3, 7, 14, 30, 90, 365], label: n => n === 1 ? "1 day" : `${n} days`,
+               ask: "Delete items after how many days?" },
+  max_items: { presets: [10, 30, 50, 100, 200, 500, 1000], label: n => n === 1 ? "1 item" : `${n} items`,
+               ask: "Keep at most how many items?" },
+  max_mb: { presets: [50, 100, 250, 500, 1000, 5000], label: n => n >= 1000 && n % 1000 === 0 ? `${n / 1000} GB` : `${n} MB`,
+            ask: "Use at most how many MB?" },
+};
+
+function fmtBytes(n) {
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function renderLimit(name, value) {
+  const select = $(name);
+  if (document.activeElement === select && select.dataset.value !== undefined) return;
+  if (select.dataset.value === String(value)) return;
+  const spec = LIMITS[name];
+  const values = [...new Set([...spec.presets, value].filter(n => n > 0))].sort((a, b) => a - b);
+  select.innerHTML = values.map(n => `<option value="${n}">${spec.label(n)}</option>`).join("")
+    + '<option value="0">No limit</option><option value="custom">Custom...</option>';
+  select.value = String(value);
+  select.dataset.value = String(value);
+}
+
+function changeLimit(name) {
+  const select = $(name);
+  let value = select.value;
+  if (value === "custom") {
+    const answer = prompt(LIMITS[name].ask + " (0 = no limit)", select.dataset.value);
+    value = answer === null ? NaN : parseInt(answer, 10);
+    if (!(value >= 0)) { select.value = select.dataset.value; return; }
+  }
+  const limits = {};
+  limits[name] = Number(value);
+  delete select.dataset.value;
+  post("/local/settings", { limits }).then(refresh).catch(e => alert(e.message));
 }
 
 function renderPairing(state) {
@@ -1287,6 +1948,10 @@ function render(state) {
   $("computer").textContent = state.computerName;
   renderPairing(state);
   $("watch").checked = state.watchClipboard;
+  $("watchText").checked = state.watchText;
+  Object.keys(LIMITS).forEach(name => renderLimit(name, state.limits[name]));
+  const count = state.shots.length;
+  $("usage").textContent = `Using ${fmtBytes(state.usageBytes)} for ${count} item${count === 1 ? "" : "s"}.`;
   $("capture").disabled = state.capturing;
   $("capture").textContent = state.capturing ? "Capturing..." : "Capture region";
   $("hotkey").innerHTML = state.hotkey ? `Press <kbd>${esc(state.hotkey)}</kbd> anywhere, or` : "";
@@ -1301,10 +1966,15 @@ function render(state) {
   state.shots.forEach((s, i) => {
     const el = document.createElement("div");
     el.className = "shot" + (i === 0 ? " next" : "");
+    const isText = s.kind === "text";
+    const preview = isText
+      ? `<div class="thumb text">${esc(s.preview)}${s.chars > s.preview.length ? "&hellip;" : ""}</div>`
+      : `<div class="thumb"><img loading="lazy" src="/local/shots/${s.id}.${s.ext}?maxWidth=480" alt=""></div>`;
+    const size = isText ? `${s.chars} characters` : `${s.width} x ${s.height} px`;
     el.innerHTML = `
-      <div class="thumb"><img loading="lazy" src="/local/shots/${s.id}.${s.ext}?maxWidth=480" alt=""></div>
+      ${preview}
       <div class="meta"><b>${fmtTime(s.createdAt)}</b>${i === 0 ? '<span class="badge">Next paste</span>' : ""}
-        <br>${s.width} x ${s.height} px - ${s.source}</div>
+        <br>${isText ? "Text" : "Image"} - ${size} - ${s.source}</div>
       <div class="actions">
         ${i === 0 ? "" : '<button class="small" data-act="promote">Use next</button>'}
         <button class="small" data-act="delete">Delete</button>
@@ -1323,17 +1993,59 @@ async function refresh() {
   }
 }
 
+const IMAGE_FILE_RE = /\.(png|jpe?g|jpe|jfif|webp|heic|heif|hif|avif|gif|tiff?|bmp|dib|svg|psd|ico|jp2|j2k|tga)$/i;
+
+function isImageFile(file) {
+  return file.type.startsWith("image/") || IMAGE_FILE_RE.test(file.name || "");
+}
+
+// Fallback for formats the computer cannot convert but this browser can display.
+function browserToPng(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth || 1200;
+      canvas.height = img.naturalHeight || 900;
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(png => png ? resolve(png) : reject(new Error("conversion failed")), "image/png");
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("unreadable")); };
+    img.src = url;
+  });
+}
+
 async function upload(blob) {
-  try { await post("/local/upload", blob, blob.type || "application/octet-stream"); refresh(); }
-  catch (e) { alert(e.message); }
+  const name = blob.name || "";
+  const headers = name ? { "X-SN-Filename": encodeURIComponent(name) } : {};
+  try {
+    await post("/local/upload", blob, blob.type || "application/octet-stream", headers);
+  } catch (e) {
+    const png = await browserToPng(blob).catch(() => null);
+    if (!png) { alert(name ? `${name}: ${e.message}` : e.message); return; }
+    await post("/local/upload", png, "image/png").catch(err => alert(err.message));
+  }
+  refresh();
 }
 
 $("capture").onclick = () => post("/local/capture").then(refresh);
 $("watch").onchange = e => post("/local/settings", { watchClipboard: e.target.checked }).then(refresh);
-$("clear").onclick = () => confirm("Delete all screenshots?") && post("/local/clear").then(refresh);
+$("watchText").onchange = e => post("/local/settings", { watchText: e.target.checked }).then(refresh);
+Object.keys(LIMITS).forEach(name => $(name).onchange = () => changeLimit(name));
+$("clear").onclick = () => confirm("Delete everything copied so far?") && post("/local/clear").then(refresh);
 document.addEventListener("paste", e => {
+  const files = [...e.clipboardData.files].filter(isImageFile);
+  if (files.length) { e.preventDefault(); files.forEach(upload); return; }
   for (const item of e.clipboardData.items) {
     if (item.type.startsWith("image/")) { upload(item.getAsFile()); e.preventDefault(); return; }
+  }
+  const text = e.clipboardData.getData("text/plain");
+  if (text.trim()) {
+    e.preventDefault();
+    post("/local/text", new Blob([text], { type: "text/plain;charset=utf-8" }), "text/plain;charset=utf-8")
+      .then(refresh).catch(err => alert(err.message));
   }
 });
 const drop = $("drop");
@@ -1344,7 +2056,10 @@ const drop = $("drop");
   e.preventDefault(); drop.classList.remove("over");
 }));
 document.addEventListener("drop", e => {
-  for (const f of e.dataTransfer.files) if (f.type.startsWith("image/")) upload(f);
+  const files = [...e.dataTransfer.files];
+  const images = files.filter(isImageFile);
+  images.forEach(upload);
+  if (files.length > images.length) alert("Only images can be added (PNG, JPEG, WebP, HEIC, GIF, SVG, ...).");
 });
 
 refresh();

@@ -1,6 +1,13 @@
 import RNFS from 'react-native-fs';
 import {PluginCommAPI, PluginFileAPI, PluginManager, PluginNoteAPI} from 'sn-plugin-lib';
-import {getLatestShot, shotUrl, tokenHeaders, unreachableError, type Shot} from './bridge';
+import {
+  getClipText,
+  getLatestClip,
+  shotUrl,
+  tokenHeaders,
+  unreachableError,
+  type Clip,
+} from './bridge';
 import {connect, type Progress} from './connection';
 import {PERM_FILE_READ, PERM_FILE_WRITE, SAVE_FOLDER} from './constants';
 import {toUserError, UserError} from './errors';
@@ -12,43 +19,56 @@ import {toast} from './toast';
 import {openScreen} from './uiState';
 
 const ERROR_NO_READ_PERMISSION = 1503;
-/** Inserted screenshots take at most this share of the page width. */
+/** Inserted screenshots and text boxes take at most this share of the page width. */
 const PAGE_WIDTH_SHARE = 0.85;
+/** Text box font size in page pixels; both models are 300 PPI, so this is about 10 pt. */
+const TEXT_FONT_SIZE = 42;
+const TEXT_LINE_HEIGHT = 1.4;
+/** Characters drawn about as wide as they are tall (CJK, Hangul, full-width forms). */
+const WIDE_CHAR_RE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/;
+
+type Size = {width: number; height: number};
 
 let busy = false;
 
-/** Page width in pixels of the open note, falling back to the device's screen width. */
-async function currentPageWidth(): Promise<number> {
+/** Page size in pixels of the open note, falling back to the device's screen size. */
+async function currentPageSize(): Promise<Size> {
   try {
     const path = asResult<string>(await PluginCommAPI.getCurrentFilePath());
     const page = asResult<number>(await PluginCommAPI.getCurrentPageNum());
     if (path.success && path.result && page.success && typeof page.result === 'number') {
-      const size = asResult<{width: number; height: number}>(
-        await PluginFileAPI.getPageSize(path.result, page.result),
-      );
-      if (size.success && size.result?.width) {
-        return size.result.width;
+      const size = asResult<Size>(await PluginFileAPI.getPageSize(path.result, page.result));
+      if (size.success && size.result?.width && size.result?.height) {
+        return size.result;
       }
     }
   } catch {
     // Fall through to the device default.
   }
   try {
-    // 5 = A5 X2 (Manta), 1920 px wide; the other plugin-capable models are 1404 px wide.
-    return (await PluginManager.getDeviceType()) === 5 ? 1920 : 1404;
+    // 5 = A5 X2 (Manta), 1920 x 2560; the other plugin-capable models are 1404 x 1872.
+    if ((await PluginManager.getDeviceType()) === 5) {
+      return {width: 1920, height: 2560};
+    }
   } catch {
-    return 1404;
+    // Use the smaller page.
   }
+  return {width: 1404, height: 1872};
 }
 
-async function download(settings: Settings, shot: Shot): Promise<string> {
+/** Widest image worth sending for the open page, in pixels. */
+export async function maxImageWidth() {
+  return Math.round((await currentPageSize()).width * PAGE_WIDTH_SHARE);
+}
+
+async function download(settings: Settings, clip: Clip): Promise<string> {
   await ensurePermission(
     PERM_FILE_WRITE,
     `PC Clipboard saves screenshots to the ${SAVE_FOLDER} folder before inserting them.`,
   );
-  const maxWidth = Math.round((await currentPageWidth()) * PAGE_WIDTH_SHARE);
+  const maxWidth = await maxImageWidth();
   const dir = `${RNFS.ExternalStorageDirectoryPath}/${SAVE_FOLDER}`;
-  const file = `${dir}/${shot.id}_w${maxWidth}.${shot.ext}`;
+  const file = `${dir}/${clip.id}_w${maxWidth}_g100.${clip.ext}`;
   if (await RNFS.exists(file)) {
     return file;
   }
@@ -58,7 +78,7 @@ async function download(settings: Settings, shot: Shot): Promise<string> {
   let status = 0;
   try {
     status = (
-      await httpDownload(shotUrl(settings, shot, maxWidth), tokenHeaders(settings), partial, 30000)
+      await httpDownload(shotUrl(settings, clip, maxWidth), tokenHeaders(settings), partial, 30000)
     ).status;
   } catch (e) {
     throw unreachableError(settings, e);
@@ -75,7 +95,7 @@ async function download(settings: Settings, shot: Shot): Promise<string> {
   return file;
 }
 
-async function insertImage(file: string) {
+export async function insertImage(file: string) {
   let res = asResult<boolean>(await PluginNoteAPI.insertImage(file));
   if (!res.success && res.error?.code === ERROR_NO_READ_PERMISSION) {
     await ensurePermission(
@@ -91,33 +111,80 @@ async function insertImage(file: string) {
   }
 }
 
-/** Download a screenshot from the computer (the newest one by default) and insert it into the open note. */
-export async function pasteShot(shot?: Shot, progress: Progress = toast) {
+/** Rough number of wrapped lines, so the text box is about as tall as its text. */
+function estimateLines(text: string, boxWidth: number, fontSize: number) {
+  let lines = 0;
+  for (const paragraph of text.split('\n')) {
+    let width = 0;
+    for (const char of paragraph) {
+      width += WIDE_CHAR_RE.test(char) ? fontSize : fontSize * 0.55;
+    }
+    lines += Math.max(1, Math.ceil(width / boxWidth));
+  }
+  return lines;
+}
+
+/** Insert text as an editable text box, centred on the page. Returns false when it may not fit. */
+export async function insertTextBox(text: string): Promise<boolean> {
+  const page = await currentPageSize();
+  const margin = Math.round((page.width * (1 - PAGE_WIDTH_SHARE)) / 2);
+  const boxWidth = page.width - 2 * margin;
+  const needed = Math.ceil(
+    (estimateLines(text, boxWidth, TEXT_FONT_SIZE) + 1) * TEXT_FONT_SIZE * TEXT_LINE_HEIGHT,
+  );
+  const height = Math.min(needed, page.height - 2 * margin);
+  const top = Math.max(margin, Math.round((page.height - height) / 2));
+
+  const res = asResult<boolean>(
+    await PluginNoteAPI.insertText({
+      textContentFull: text,
+      fontSize: TEXT_FONT_SIZE,
+      textRect: {left: margin, top, right: margin + boxWidth, bottom: top + height},
+      textAlign: 0,
+      textBold: 0,
+      textItalics: 0,
+      textFrameWidthType: 0,
+      textEditable: 0,
+    }),
+  );
+  if (!res.success || res.result === false) {
+    throw new UserError(
+      `The note did not accept the text${res.error?.message ? `: ${res.error.message}` : '.'}`,
+    );
+  }
+  return needed <= height;
+}
+
+/** Paste a clip from the computer (the newest one by default) into the open note. */
+export async function pasteClip(clip?: Clip, progress: Progress = toast) {
   if (busy) {
-    throw new UserError('A screenshot is already being pasted.');
+    throw new UserError('Already pasting.');
   }
   busy = true;
   try {
     const settings = await connect({progress});
-    const target = shot ?? (await getLatestShot(settings));
+    const target = clip ?? (await getLatestClip(settings));
     if (!target) {
       throw new UserError(
-        'There are no screenshots on your computer yet. Take one with Supernote Clipboard first.',
+        'Nothing to paste yet. Take a screenshot or copy some text on your computer first.',
       );
     }
-    const file = await download(settings, target);
-    await insertImage(file);
+    if (target.kind === 'text') {
+      const fits = await insertTextBox(await getClipText(settings, target));
+      return fits ? 'Text pasted.' : 'Text pasted. It is long, so part of it may be off the page.';
+    }
+    await insertImage(await download(settings, target));
+    return 'Screenshot pasted.';
   } finally {
     busy = false;
   }
 }
 
 /** Paste and report the outcome; on failure the plugin view opens with the reason. */
-export async function pasteAndReport(shot?: Shot) {
+export async function pasteAndReport(clip?: Clip) {
   try {
-    toast('Pasting screenshot...');
-    await pasteShot(shot);
-    toast('Screenshot pasted.');
+    toast('Pasting...');
+    toast(await pasteClip(clip));
   } catch (e) {
     const error = toUserError(e);
     openScreen(error.kind === 'config' ? 'settings' : 'shots', {

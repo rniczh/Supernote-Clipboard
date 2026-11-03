@@ -1,17 +1,19 @@
 # PC Clipboard for Supernote
 
-Take a screenshot on your computer, tap **Paste screenshot** on your Supernote, and the image is inserted into the note you are writing in.
+Copy something on your computer, then tap **Paste from PC** on the Supernote. A screenshot/images goes in as a picture. Copied text goes in as a text box.
 
-![Demo: capturing a region on the Mac and pasting it into a Supernote note](docs/demo.gif)
+You can also send a photo or copied text from your phone. Tap **Paste from phone**, scan the QR code, and pick a photo or paste what you copied. Details are in [Paste from your phone](#paste-from-your-phone).
 
-*Supernote screen on the left, the Supernote Clipboard window on the right (4× speed). [Watch the full video](docs/demo.mp4).*
+![Demo (outdated): capturing a region on the Mac and pasting it into a Supernote note](docs/demo.gif)
+
+*[Watch the full video](docs/demo.mp4).*
 
 The project has two parts:
 
 | Part | Where it runs | What it does |
 | --- | --- | --- |
-| `desktop/sn_clipboard.py` (**Supernote Clipboard**) | Your computer (macOS, Windows, Linux) | Screenshot tool + small local server that holds your recent screenshots |
-| `supernote-plugin/` (**PC Clipboard**) | Supernote (NOTE app) | Toolbar buttons that download a screenshot from your computer and insert it into the page |
+| `desktop/sn_clipboard.py` (**Supernote Clipboard**) | Your computer (macOS, Windows, Linux) | A clipboard for images, screenshots, and text |
+| `supernote-plugin/` (**PC Clipboard**) | Supernote (NOTE app) | Toolbar buttons that pull an image or text from the computer, or take one from your phone, and put it on the page |
 
 Both devices must be on the same Wi-Fi network.
 
@@ -21,33 +23,33 @@ Get the latest files from the [Releases](../../releases) page:
 
 | File | For |
 | --- | --- |
-| `PCClipboard.snplg` | The Supernote plugin (install it as described in [step 2](#2-install-the-plugin-on-your-supernote)) |
+| `PCClipboard.snplg` | The Supernote plugin ([step 2](#2-install-the-plugin-on-your-supernote)) |
 | `SupernoteClipboard-macOS-<version>.zip` | The macOS menu bar app (Apple Silicon and Intel, macOS 13 or newer) |
 
 Installing the macOS app:
 
 1. Unzip it and drag **Supernote Clipboard.app** into **Applications**.
-2. Open it. The app is not notarized by Apple, so macOS blocks it the first time ("Apple could not verify..."). Go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway**, then open it again.
-3. It needs Python 3. If macOS offers to install the command line developer tools, accept.
-4. The first capture asks for **Screen Recording** permission: enable Supernote Clipboard in **System Settings → Privacy & Security → Screen Recording**, then quit and reopen the app.
+2. Open it. Apple has not notarized the app, so the first launch is blocked ("Apple could not verify..."). In **System Settings → Privacy & Security**, scroll down, click **Open Anyway**, and open the app again.
+3. It runs on Python 3, which is not inside the app. macOS may ask to install the command line developer tools.
+4. The first capture asks for **Screen Recording**. Turn on Supernote Clipboard under **System Settings → Privacy & Security → Screen Recording**, then quit the app and open it again.
 
-On Windows and Linux, run `desktop/sn_clipboard.py` from the source code instead (see below).
+On Windows and Linux there is no packaged app. Run `desktop/sn_clipboard.py` from the source, as below.
 
 ## 1. Start Supernote Clipboard on your computer
 
-Requires Python 3.8 or newer (macOS already has `python3`). No other installs are needed.
+You need Python 3.8 or newer. Nothing else from pip.
 
 ### macOS: menu bar app
 
-Download it from Releases (see above), or build it from source:
+Use the zip from Releases, or build it:
 
 ```bash
 desktop/macos/build-app.sh --install
 ```
 
-This builds `Supernote Clipboard.app` (needs the Xcode command line tools for `swiftc`) and puts it in **/Applications**. Open it like any other app: it lives in the menu bar (camera icon) with **Capture Region**, **Open Window**, **Open at Login**, **Show Log** and **Quit**. The first capture asks for **Screen Recording** permission for Supernote Clipboard; allow it in System Settings → Privacy & Security, then quit and reopen the app.
+That needs the Xcode command line tools (`swiftc`). It builds `Supernote Clipboard.app` and puts it in **/Applications**. The camera icon in the menu bar has **Capture Region**, **Open Window**, **Open at Login**, **Show Log** and **Quit**. The first capture asks for Screen Recording for Supernote Clipboard. Allow it, then quit and reopen.
 
-The app is a small Swift shell (`desktop/macos/SupernoteClipboard.swift`) around a copy of `sn_clipboard.py`. To customize it, edit those files and run `build-app.sh --install` again. The build signs the app with a local certificate (created on the first build in `~/Library/Application Support/Supernote Clipboard/`), so the Screen Recording permission stays valid across rebuilds. If macOS keeps asking even though Supernote Clipboard is enabled, remove it from the Screen Recording list (or run `tccutil reset ScreenCapture com.rnic.supernote-clipboard`) and allow it again. Only run one copy at a time (quit the terminal version first), since both use port 8765.
+The app is a short Swift program (`desktop/macos/SupernoteClipboard.swift`) that runs a copy of `sn_clipboard.py`. After you change either file, run `build-app.sh --install` again. The build signs the app with a certificate kept in `~/Library/Application Support/Supernote Clipboard/`, created the first time you build, so Screen Recording permission survives a rebuild. If macOS keeps asking while Supernote Clipboard is already enabled, remove it from the Screen Recording list (or run `tccutil reset ScreenCapture com.rnic.supernote-clipboard`) and allow it again. Don't run the menu bar app and the terminal copy at the same time. Both want port 8765.
 
 ### Any system: terminal
 
@@ -55,83 +57,111 @@ The app is a small Swift shell (`desktop/macos/SupernoteClipboard.swift`) around
 python3 desktop/sn_clipboard.py
 ```
 
-On macOS you can also double-click `desktop/Supernote Clipboard.command`.
+On a Mac you can also double-click `desktop/Supernote Clipboard.command`.
 
-A browser window opens at `http://localhost:8765` (the macOS app opens it only until a Supernote is paired). Keep the app running while you take notes. There is nothing to copy over to the Supernote: it finds the computer by itself (see below).
+A browser window opens at `http://localhost:8765` (the macOS app opens it only until a Supernote is paired). Keep the app running while you take notes.
 
 Ways to get a screenshot into the app:
 
-- **Capture shortcut**, like Xnip: press `Option + Shift + S` (macOS) or `Ctrl + Alt + S` (Windows) anywhere, drag over the area you want, and it is ready for your Supernote. Press `Esc` to cancel. The **Capture region** button in the window does the same.
-- **Any screenshot copied to the clipboard** is picked up automatically, so your usual tool works too (Xnip, CleanShot, Snagit, ... when set to copy to the clipboard):
-  - macOS: `Cmd + Ctrl + Shift + 4` (the `Ctrl` copies it to the clipboard)
+- **Capture shortcut.** Press `Option + Shift + S` (macOS) or `Ctrl + Alt + S` (Windows), drag over the area, and it is waiting for the Supernote. `Esc` cancels. **Capture region** in the window does the same thing.
+- **A screenshot you already copied.** If your usual tool copies to the clipboard (Xnip, CleanShot, Snagit, and so on), the app picks it up.
+  - macOS: `Cmd + Ctrl + Shift + 4` (the `Ctrl` is what copies it)
   - Windows: `Win + Shift + S`
-  - Linux: any tool that copies a PNG (requires `wl-clipboard` or `xclip`)
-- Drag and drop an image onto the window, or press `Cmd/Ctrl + V` inside it.
+  - Linux: a tool that copies a PNG. This needs `wl-clipboard` or `xclip`.
+- **Image files.** Copy one or more in Finder or Explorer. Each becomes an item.
+- **Text.** Anything you copy is picked up and pasted on the Supernote as a text box.
+- Drag images onto the window, or press `Cmd/Ctrl + V` in it. That works for images and text.
 
-The newest screenshot is marked **Next paste**. Click **Use next** on an older one to paste that instead.
+The newest item is marked **Next paste**. **Use next** on an older one makes that the one that gets pasted.
 
-To use a different shortcut, start the app once with `--hotkey`, for example `--hotkey cmd+shift+2` (modifiers `cmd`/`win`, `ctrl`, `alt`/`option`, `shift`, plus a letter or digit; `--hotkey off` disables it). The choice is remembered. Pick one that no other app uses. On Linux, bind `python3 /path/to/desktop/sn_clipboard.py capture` to a shortcut in your desktop settings instead.
+The shortcut can be changed. Start once with `--hotkey`, for example `--hotkey cmd+shift+2`. Modifiers are `cmd`/`win`, `ctrl`, `alt`/`option`, `shift`, plus a letter or digit. `--hotkey off` turns it off. The app remembers the choice. Pick keys nothing else is using. On Linux, bind `python3 /path/to/desktop/sn_clipboard.py capture` to a shortcut in the desktop settings instead.
 
-Other commands: `sn_clipboard.py add image.png`, `sn_clipboard.py --port 9000`, `--no-watch` (turn off clipboard import), `--no-browser`.
+Other commands: `sn_clipboard.py add image.png`, `sn_clipboard.py --port 9000`, `--no-watch` (don't import images from the clipboard), `--no-browser`.
 
-Data lives in `~/.sn-clipboard/` (last 30 screenshots and the list of paired Supernotes).
+### What is stored, and for how long
+
+Everything stays in `~/.sn-clipboard/`: images and text in `shots/`, paired Supernotes in `config.json`. Nothing is uploaded. Only a Supernote you have allowed can download items, and only on your local network.
+
+**Storage** in the window has three limits. Each can be **No limit**, or a number you type under **Custom...**:
+
+| Limit | Default | Command line |
+| --- | --- | --- |
+| **Delete after**: older items are removed | 7 days | `--keep-days N` |
+| **Keep at most**: only the newest items stay | 30 items | `--max-items N` |
+| **Use at most**: the oldest items go when the folder grows past this | No limit | `--max-mb N` |
+
+On the command line, `0` means no limit. The window shows how much space the items are using. A size limit will not delete the newest item, so one large screenshot can still be pasted. **Delete** removes one item. **Clear all** removes every item.
+
+Pictures you paste also land in `SCREENSHOT/PC Clipboard/` on the Supernote. The plugin does not empty that folder. Pasted text only exists in the note.
 
 ## 2. Install the plugin on your Supernote
 
 Your Supernote needs firmware with plugin support (Settings → Apps → Plugins).
 
-1. Download `PCClipboard.snplg` from the [Releases](../../releases) page (or build it, see below). Connect the Supernote by USB (or use Browse & Access) and copy the file into the **MyStyle** folder.
-2. On the Supernote: **Settings → Apps → Plugins → Add Plugin**, pick `PCClipboard.snplg` and install.
-3. Open a note. The toolbar now has two buttons:
-   - **Paste screenshot**: inserts the newest screenshot right away, without opening any screen.
-   - **PC Screenshots**: shows your recent screenshots so you can pick one, plus **Settings**.
+1. Download `PCClipboard.snplg` from [Releases](../../releases) (or build it, below). Connect the Supernote over USB, or use Browse & Access, and copy the file into **MyStyle**.
+2. On the Supernote: **Settings → Apps → Plugins → Add Plugin**, choose `PCClipboard.snplg`, and install.
+3. Open a note. The toolbar has three buttons:
+   - **Paste from PC** puts in the newest screenshot or text.
+   - **PC Clipboard** lists recent screenshots and text so you can pick one. **Settings** is in there too.
+   - **Paste from phone** shows a QR code. The phone can send a photo or copied text.
 
-### First paste: one click on the computer, no typing
+### The first paste
 
-Tap **Paste screenshot**. The plugin searches your Wi-Fi for the computer running Supernote Clipboard, and the computer shows *"Supernote Manta wants to connect"* (with a notification on macOS). Click **Allow** once. The screenshot is pasted, and from then on every paste goes straight through.
+Tap **Paste from PC**. The plugin looks on the Wi-Fi for the computer running Supernote Clipboard. The computer asks *"Supernote Manta wants to connect"* (on a Mac you also get a notification). Click **Allow** once. That paste goes through, and later pastes do too.
 
-If the computer gets a new IP address later (after a restart or on another network), the plugin finds it again by itself and stays paired. **Remove** in the computer window unpairs a Supernote.
+If the computer's IP changes, after a restart or on another network, the plugin finds it again and the pairing stays. **Remove** in the computer window forgets that Supernote.
 
-If the computer is not found automatically (for example on networks that separate devices into different subnets), open **PC Screenshots → Settings** and enter the address shown in the computer window under "Not found automatically?".
+The Supernote asks for permission the first time. Choose **Always allow**, or it will ask again next session:
 
-The first time, the Supernote also asks for permissions. Choose **Always allow** so you are not asked every session:
-
-- **Network**: to download screenshots from your computer.
-- **File write / read**: downloaded screenshots are saved to `SCREENSHOT/PC Clipboard/` and inserted from there.
+- **Network**, so it can download from the computer and receive photos from the phone.
+- **File write / read**, because downloaded pictures are saved under `SCREENSHOT/PC Clipboard/` and inserted from there.
 
 ## Daily use
 
-1. On the computer: press `Option + Shift + S` (Windows: `Ctrl + Alt + S`) and drag over the area.
-2. On the Supernote: tap **Paste screenshot**.
-3. Use the lasso to move or resize the image.
+1. On the computer, press `Option + Shift + S` (Windows: `Ctrl + Alt + S`) and drag, or copy some text/images.
+2. On the Supernote, tap **Paste from PC**.
+3. Move or resize it with the lasso.
 
-Screenshots are scaled on the computer to about 85% of the page width before they are sent.
+## Paste from your phone
+
+The phone needs no app, and the computer does not have to be running.
+
+1. On the Supernote, open a note and tap **Paste from phone**. A QR code shows.
+2. Point the phone camera at it and open the link. The phone has to be on the same Wi-Fi as the Supernote.
+3. On the page:
+   - **Choose photos** or **Take a photo** for one or more pictures from the camera roll.
+   - **Or paste what you copied.** Long-press the box and choose **Paste**. A copied image is sent immediately. Copied text shows up in the box, then tap **Send text**.
+
+You can keep sending. Each item goes onto the page you have open. The link dies after 10 minutes with nothing sent, or when you tap **Stop** (**PC Clipboard → Phone**). **New code** makes another one.
 
 ## Troubleshooting
 
-- **"Couldn't find your computer"**: check that the app is running and both devices are on the same Wi-Fi (not a guest network). On macOS allow incoming connections for Python if the firewall asks. Some routers block devices from talking to each other ("AP/client isolation"); then enter the address manually in Settings.
-- **"No answer from your computer"**: the pairing request was not allowed within two minutes. Tap again and click **Allow** in the computer window.
-- **"No longer paired"**: the Supernote was removed in the computer window. Tap **Find my computer** in Settings and allow it again.
-- **The capture is only the desktop wallpaper (macOS)**: give your terminal (or Python) Screen Recording permission in System Settings → Privacy & Security.
-- **The capture shortcut does nothing**: another app (for example Xnip itself) may use the same keys. Choose another one with `--hotkey`. The current shortcut is shown at the top of the window and in the terminal ("Capture: press ⌥⇧S anywhere").
-- **Nothing happens on Paste**: open **PC Screenshots**; the reason is shown at the top.
+- **"Couldn't find your computer".** The app has to be running, and both devices have to be on the same Wi-Fi, not a guest network. On macOS, allow incoming connections for Python if the firewall asks. Some routers isolate clients from each other. If yours does, type the address by hand in Settings.
+- **"No answer from your computer".** The pairing request was not allowed within two minutes. Tap again and click **Allow** on the computer.
+- **"No longer paired".** That Supernote was removed in the computer window. Tap **Find my computer** in Settings and allow it again.
+- **The capture is only the desktop wallpaper (macOS).** Give the terminal, or Python, Screen Recording permission in System Settings → Privacy & Security.
+- **The capture shortcut does nothing.** Something else may be using those keys, often Xnip. Pick another combination with `--hotkey`. The current one is at the top of the window and in the terminal ("Capture: press ⌥⇧S anywhere").
+- **Nothing happens on Paste.** Open **PC Clipboard**. The reason is at the top.
+- **Copied text does not show up.** Check **Import copied text** in the window. Text that a password manager marks as a password is skipped.
+- **The phone cannot open the QR link.** The phone and the Supernote have to be on the same Wi-Fi. Turn off mobile data if the phone keeps using it, and skip guest networks that isolate clients. If the page says the link expired, tap **New code** and scan again.
 
 ## Security
 
-- Only Supernotes you allowed in the computer window can download screenshots; each gets its own secret token, and **Remove** revokes it.
-- Pairing requests can only be allowed from the computer itself. The control window (`http://localhost:8765`) only works on the computer itself.
-- Traffic is plain HTTP on your local network. Use it on networks you trust.
+- A Supernote can download screenshots only after you allow it on the computer. Each one gets its own token. **Remove** takes that token away.
+- Pairing can only be approved on the computer. The window at `http://localhost:8765` does not answer from other machines.
+- **Paste from phone** is only up while you are using it. The QR code holds a random secret, the Supernote does not answer other requests, and the link stops after 10 minutes idle, when you tap **Stop**, or when you make a new code.
+- Traffic is plain HTTP on the local network. Use a network you trust.
 
 ## Building the plugin
 
-Ready-made builds are on the [Releases](../../releases) page. To build it yourself (macOS):
+Builds you can install are on the [Releases](../../releases) page. To build on a Mac:
 
 ```bash
-./scripts/setup-toolchain.sh   # once: downloads JDK 17 + Android SDK into .toolchain/ (about 1 GB with the Gradle cache)
+./scripts/setup-toolchain.sh   # once: JDK 17 and the Android SDK into .toolchain/ (about 1 GB with the Gradle cache)
 ./scripts/build-plugin.sh      # type-checks, builds, copies to dist/PCClipboard.snplg
 ```
 
-The plugin is a React Native 0.79.2 project using the official [`sn-plugin-lib`](https://docs.supernote.com/en) SDK (0.2.3), `react-native-fs` for local files, and two small Java modules: `PCNetworkInfo` reports the Supernote's own IP so it knows which subnet to search, and `PCHttp` talks to the computer over plain sockets (the Supernote plugin host blocks cleartext HTTP in `fetch`). Keep `pluginID` in `supernote-plugin/PluginConfig.json` unchanged, otherwise the Supernote treats a new build as a different plugin; bump `versionCode` / `versionName` for updates.
+The plugin is React Native 0.79.2 on the official [`sn-plugin-lib`](https://docs.supernote.com/en) SDK (0.2.3). It uses `react-native-fs` for local files and `qrcode-generator` for the phone QR code. Three small Java modules sit next to that: `PCNetworkInfo` reads the Supernote's own IP so the plugin knows which subnet to search, `PCHttp` talks to the computer over plain sockets (the plugin host blocks cleartext HTTP in `fetch`), and `PCPhoneServer` is the little server the phone sends photos and text to. Leave `pluginID` in `supernote-plugin/PluginConfig.json` alone. A new id is a different plugin to the Supernote. Bump `versionCode` and `versionName` when you ship an update.
 
 Layout:
 
@@ -139,20 +169,22 @@ Layout:
 desktop/sn_clipboard.py          computer app (server, capture, clipboard import, web UI)
 desktop/macos/                   menu bar app: Swift shell, Info.plist, icon, build-app.sh
 supernote-plugin/index.js        button registration
-supernote-plugin/App.tsx         plugin screen (screenshot list, settings)
-supernote-plugin/src/paste.ts       download + insert flow
+supernote-plugin/App.tsx         plugin screen (clipboard list, phone QR code, settings)
+supernote-plugin/src/paste.ts       download + insert flow (image or text box)
+supernote-plugin/src/phone.ts       Paste from phone session: server, QR link, inserting what arrives
+supernote-plugin/src/phonePage.ts   the page the phone opens (photo picker, paste box, grayscale)
 supernote-plugin/src/connection.ts  find the computer, pair, remember it
 supernote-plugin/src/discovery.ts   Wi-Fi subnet search
 supernote-plugin/src/bridge.ts      HTTP client for the computer app
 supernote-plugin/src/settings.ts    saved computer and pairing token
 supernote-plugin/src/http.ts        requests through the native PCHttp module
-supernote-plugin/android/app/src/main/java/com/pcclipboard/   PCNetworkInfo and PCHttp native modules
+supernote-plugin/android/app/src/main/java/com/pcclipboard/   PCNetworkInfo, PCHttp and PCPhoneServer native modules
 ```
 
 ## Making a release
 
-1. Bump the versions: `versionName` / `versionCode` in `supernote-plugin/PluginConfig.json` and `VERSION` in `desktop/sn_clipboard.py`.
-2. Build both parts and zip the app (the files land in `dist/`, which is not committed):
+1. Bump `versionName` and `versionCode` in `supernote-plugin/PluginConfig.json`, and `VERSION` in `desktop/sn_clipboard.py`.
+2. Build both and zip the app. The results go in `dist/`, which is not committed:
 
    ```bash
    ./scripts/build-plugin.sh
@@ -160,7 +192,7 @@ supernote-plugin/android/app/src/main/java/com/pcclipboard/   PCNetworkInfo and 
    ditto -c -k --norsrc --noextattr --keepParent "dist/Supernote Clipboard.app" "dist/SupernoteClipboard-macOS-<version>.zip"
    ```
 
-3. On GitHub, open **Releases → Draft a new release**, create a tag such as `v1.2.0`, and attach `dist/PCClipboard.snplg` and the zip.
+3. On GitHub, open **Releases → Draft a new release**, make a tag such as `v1.3.0`, and attach `dist/PCClipboard.snplg` and the zip.
 
 ## License
 

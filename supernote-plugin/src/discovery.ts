@@ -21,7 +21,7 @@ const PROBE_TIMEOUT_MS = 1500;
 const FALLBACK_SUBNETS = ['192.168.0', '192.168.1', '192.168.2', '10.0.0', '10.0.1'];
 
 /** IPv4 addresses of this Supernote, Wi-Fi interfaces first (native PCNetworkInfo module). */
-async function localAddresses(): Promise<LocalAddress[]> {
+export async function localAddresses(): Promise<LocalAddress[]> {
   const module = NativeModules.PCNetworkInfo;
   if (!module?.getIPv4Addresses) {
     return [];

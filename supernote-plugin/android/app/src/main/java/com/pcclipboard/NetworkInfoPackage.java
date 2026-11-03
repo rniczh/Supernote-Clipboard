@@ -13,7 +13,8 @@ public class NetworkInfoPackage implements ReactPackage {
 
     @Override
     public List<NativeModule> createNativeModules(ReactApplicationContext context) {
-        return Arrays.asList(new NetworkInfoModule(context), new SocketHttpModule(context));
+        return Arrays.asList(new NetworkInfoModule(context), new SocketHttpModule(context),
+                new PhoneServerModule(context));
     }
 
     @Override

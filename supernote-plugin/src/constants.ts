@@ -1,5 +1,6 @@
 export const BUTTON_PASTE = 100;
 export const BUTTON_BROWSE = 101;
+export const BUTTON_PHONE = 102;
 
 export const PERM_INTERNET = 'plugin.permission.INTERNET';
 export const PERM_FILE_READ = 'plugin.permission.FILE:READ';

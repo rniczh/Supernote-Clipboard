@@ -1,4 +1,5 @@
-import React, {useCallback, useEffect, useState} from 'react';
+import qrcode from 'qrcode-generator';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   FlatList,
   Image,
@@ -10,11 +11,17 @@ import {
 } from 'react-native';
 import RNFS from 'react-native-fs';
 import {PluginManager} from 'sn-plugin-lib';
-import {listShots, shotUrl, tokenHeaders, type Shot} from './src/bridge';
+import {listClips, shotUrl, tokenHeaders, type Clip} from './src/bridge';
 import {connect} from './src/connection';
 import {toUserError} from './src/errors';
 import {httpDownload} from './src/http';
 import {pasteAndReport} from './src/paste';
+import {
+  PHONE_IDLE_MINUTES,
+  startPhoneSession,
+  stopPhoneSession,
+  usePhoneSession,
+} from './src/phone';
 import {
   displayAddress,
   EMPTY_SETTINGS,
@@ -75,12 +82,12 @@ function formatTime(ms: number) {
 }
 
 /** Thumbnail cached on the Supernote; Image cannot load it over HTTP from the computer itself. */
-function ShotThumb({settings, shot}: {settings: Settings; shot: Shot}) {
+function ShotThumb({settings, shot}: {settings: Settings; shot: Clip}) {
   const [path, setPath] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    const file = `${RNFS.CachesDirectoryPath}/thumbs/${shot.id}_w${THUMB_WIDTH}.${shot.ext}`;
+    const file = `${RNFS.CachesDirectoryPath}/thumbs/${shot.id}_w${THUMB_WIDTH}_g100.${shot.ext}`;
     (async () => {
       if (!(await RNFS.exists(file))) {
         const {status} = await httpDownload(
@@ -111,9 +118,21 @@ function ShotThumb({settings, shot}: {settings: Settings; shot: Shot}) {
   );
 }
 
+function TextPreview({clip}: {clip: Clip}) {
+  const more = (clip.chars ?? 0) > (clip.preview ?? '').length ? '…' : '';
+  return (
+    <View style={styles.textThumb}>
+      <Text style={styles.textThumbText} numberOfLines={8}>
+        {clip.preview}
+        {more}
+      </Text>
+    </View>
+  );
+}
+
 function ShotsScreen({openCount}: {openCount: number}) {
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [shots, setShots] = useState<Shot[] | null>(null);
+  const [shots, setShots] = useState<Clip[] | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
@@ -130,7 +149,7 @@ function ShotsScreen({openCount}: {openCount: number}) {
         setNotice(null);
       }
       setSettings(current);
-      setShots(await listShots(current));
+      setShots(await listClips(current));
     } catch (e) {
       const error = toUserError(e);
       setShots(null);
@@ -148,7 +167,7 @@ function ShotsScreen({openCount}: {openCount: number}) {
     load();
   }, [load, openCount]);
 
-  const paste = (shot: Shot) => {
+  const paste = (shot: Clip) => {
     setNotice(null);
     closeView();
     pasteAndReport(shot);
@@ -159,14 +178,14 @@ function ShotsScreen({openCount}: {openCount: number}) {
       <View style={styles.toolbar}>
         <Text style={styles.hint}>
           {loading
-            ? 'Loading screenshots from your computer...'
-            : 'Tap a screenshot to paste it into this page.'}
+            ? 'Loading from your computer...'
+            : 'Tap a screenshot or text to paste it into this page.'}
         </Text>
         <Button label="Refresh" onPress={load} disabled={loading} />
       </View>
       {shots && shots.length === 0 && !loading ? (
         <Text style={styles.empty}>
-          No screenshots yet. Take one on your computer with Supernote Clipboard.
+          Nothing yet. Take a screenshot or copy some text on your computer.
         </Text>
       ) : null}
       {settings && shots ? (
@@ -176,14 +195,20 @@ function ShotsScreen({openCount}: {openCount: number}) {
           contentContainerStyle={styles.list}
           renderItem={({item, index}) => (
             <Pressable style={styles.shot} onPress={() => paste(item)}>
-              <ShotThumb settings={settings} shot={item} />
+              {item.kind === 'text' ? (
+                <TextPreview clip={item} />
+              ) : (
+                <ShotThumb settings={settings} shot={item} />
+              )}
               <View style={styles.shotInfo}>
                 <Text style={styles.shotTitle}>
                   {index === 0 ? 'Newest  ·  ' : ''}
                   {formatTime(item.createdAt)}
                 </Text>
                 <Text style={styles.shotMeta}>
-                  {item.width} × {item.height} px
+                  {item.kind === 'text'
+                    ? `Text · ${item.chars ?? 0} characters`
+                    : `${item.width} × ${item.height} px`}
                 </Text>
                 <View style={styles.shotAction}>
                   <Button label="Paste" primary onPress={() => paste(item)} />
@@ -193,6 +218,101 @@ function ShotsScreen({openCount}: {openCount: number}) {
           )}
         />
       ) : null}
+    </View>
+  );
+}
+
+/** QR code drawn with plain Views: one black bar per run of dark modules in a row. */
+function QrCode({value, size}: {value: string; size: number}) {
+  const rows = useMemo(() => {
+    const qr = qrcode(0, 'M');
+    qr.addData(value);
+    qr.make();
+    const count = qr.getModuleCount();
+    const result: {start: number; length: number}[][] = [];
+    for (let r = 0; r < count; r++) {
+      const runs: {start: number; length: number}[] = [];
+      for (let c = 0; c < count; c++) {
+        if (!qr.isDark(r, c)) {
+          continue;
+        }
+        const last = runs[runs.length - 1];
+        if (last && last.start + last.length === c) {
+          last.length += 1;
+        } else {
+          runs.push({start: c, length: 1});
+        }
+      }
+      result.push(runs);
+    }
+    return result;
+  }, [value]);
+
+  const quiet = 4;
+  const cell = Math.max(4, Math.floor(size / (rows.length + 2 * quiet)));
+  return (
+    <View style={[styles.qr, {padding: quiet * cell}]}>
+      <View style={{width: rows.length * cell, height: rows.length * cell}}>
+        {rows.map((runs, r) =>
+          runs.map(run => (
+            <View
+              key={`${r}-${run.start}`}
+              style={[
+                styles.qrDark,
+                {top: r * cell, left: run.start * cell, width: run.length * cell, height: cell},
+              ]}
+            />
+          )),
+        )}
+      </View>
+    </View>
+  );
+}
+
+function PhoneScreen({openCount}: {openCount: number}) {
+  const session = usePhoneSession();
+
+  useEffect(() => {
+    if (session.status === 'off' || session.status === 'error') {
+      startPhoneSession();
+    }
+    // Only on open; status changes while open must not restart the session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCount]);
+
+  const live = session.status === 'waiting' || session.status === 'connected';
+  return (
+    <View style={styles.phone}>
+      {session.status === 'starting' ? <Text style={styles.paragraph}>Starting...</Text> : null}
+      {session.message ? <Text style={styles.paragraph}>{session.message}</Text> : null}
+      {live && session.url ? (
+        <>
+          <QrCode value={session.url} size={520} />
+          <Text style={styles.phoneUrl} selectable>
+            {session.url}
+          </Text>
+          <Text style={styles.phoneStatus}>
+            {session.status === 'connected'
+              ? 'Phone connected. Choose a photo or paste on your phone; it appears on this page.'
+              : 'Scan this code with your phone camera.'}
+          </Text>
+          <Text style={styles.paragraph}>
+            The phone must be on the same Wi-Fi as this Supernote. On the page that opens, choose a
+            photo, take one, or paste what you copied. This window closes and the item is placed on
+            the current page. You can keep sending from the phone; the code stops working after{' '}
+            {PHONE_IDLE_MINUTES} minutes without use.
+          </Text>
+        </>
+      ) : null}
+      <View style={styles.formActions}>
+        <Button
+          label="New code"
+          primary={!live}
+          disabled={session.status === 'starting'}
+          onPress={startPhoneSession}
+        />
+        {live ? <Button label="Stop" onPress={() => stopPhoneSession('Stopped.')} /> : null}
+      </View>
     </View>
   );
 }
@@ -215,7 +335,7 @@ function SettingsScreen() {
       });
       setSettings(connected);
       setNotice({
-        text: `Connected to ${connected.serverName}. You can now use "Paste screenshot".`,
+        text: `Connected to ${connected.serverName}. You can now use "Paste from PC".`,
         error: false,
       });
     } catch (e) {
@@ -289,12 +409,17 @@ function App(): React.JSX.Element {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>PC Screenshots</Text>
+        <Text style={styles.title}>PC Clipboard</Text>
         <View style={styles.tabs}>
           <Button
-            label="Screenshots"
+            label="Clipboard"
             primary={screen === 'shots'}
             onPress={() => openScreen('shots')}
+          />
+          <Button
+            label="Phone"
+            primary={screen === 'phone'}
+            onPress={() => openScreen('phone')}
           />
           <Button
             label="Settings"
@@ -305,7 +430,9 @@ function App(): React.JSX.Element {
         </View>
       </View>
       <NoticeBanner notice={notice} />
-      {screen === 'shots' ? <ShotsScreen openCount={openCount} /> : <SettingsScreen />}
+      {screen === 'shots' ? <ShotsScreen openCount={openCount} /> : null}
+      {screen === 'phone' ? <PhoneScreen openCount={openCount} /> : null}
+      {screen === 'settings' ? <SettingsScreen /> : null}
     </View>
   );
 }
@@ -364,6 +491,16 @@ const styles = StyleSheet.create({
     gap: 20,
   },
   thumb: {width: THUMB_WIDTH, maxHeight: 360, backgroundColor: '#f2f2f2'},
+  textThumb: {
+    width: THUMB_WIDTH,
+    minHeight: 120,
+    maxHeight: 360,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#888888',
+    overflow: 'hidden',
+  },
+  textThumbText: {fontSize: 20, lineHeight: 28, color: '#000000'},
   shotInfo: {flex: 1, justifyContent: 'center', gap: 8},
   shotTitle: {fontSize: 24, fontWeight: '700', color: '#000000'},
   shotMeta: {fontSize: 20, color: '#333333'},
@@ -382,6 +519,11 @@ const styles = StyleSheet.create({
   },
   formActions: {flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8},
   section: {marginTop: 40},
+  phone: {paddingHorizontal: 28, paddingTop: 24, alignItems: 'center', gap: 12},
+  qr: {backgroundColor: '#ffffff', borderWidth: 2, borderColor: '#000000'},
+  qrDark: {position: 'absolute', backgroundColor: '#000000'},
+  phoneUrl: {fontSize: 18, color: '#333333'},
+  phoneStatus: {fontSize: 24, fontWeight: '700', color: '#000000', textAlign: 'center'},
 });
 
 export default App;
