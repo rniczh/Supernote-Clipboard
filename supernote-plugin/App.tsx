@@ -273,7 +273,7 @@ function PhoneScreen({openCount}: {openCount: number}) {
   const session = usePhoneSession();
 
   useEffect(() => {
-    if (session.status === 'off' || session.status === 'error') {
+    if (session.status === 'off' || session.status === 'error' || session.status === 'starting') {
       startPhoneSession();
     }
     // Only on open; status changes while open must not restart the session.
