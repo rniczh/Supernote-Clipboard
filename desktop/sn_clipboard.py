@@ -53,7 +53,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "Supernote Clipboard"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 DEFAULT_PORT = 8765
 # Storage limits; 0 means no limit. (default, largest accepted value)
 STORAGE_LIMITS = {
