@@ -1670,7 +1670,12 @@ def serve(args):
     print(f"  Network:      {addresses}")
     print(f"  Paired:       {len(config.devices)} Supernote(s)")
     print(f"  Keeps:        {describe_limits(config.limits)}")
-    print(f"  Data folder:  {DATA_DIR}\n  Press Ctrl+C to quit.\n", flush=True)
+    print(f"  Data folder:  {DATA_DIR}")
+    if SYSTEM == "Windows":
+        print("  Firewall:     If Windows asks, allow this app on private networks.")
+        print("                That allow covers every port, including one you choose later.")
+    quit_hint = "Close this window to quit." if getattr(sys, "frozen", False) else "Press Ctrl+C to quit."
+    print(f"  {quit_hint}\n", flush=True)
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(local_url)).start()
     try:
@@ -1697,7 +1702,8 @@ def call_running_instance(path, body, content_type="application/json", headers=N
     except urllib.error.HTTPError as exc:
         sys.exit(f"Error: {json.loads(exc.read() or b'{}').get('error', exc)}")
     except urllib.error.URLError:
-        sys.exit("Supernote Clipboard is not running. Start it first with: python3 sn_clipboard.py")
+        start = f'"{sys.executable}"' if getattr(sys, "frozen", False) else "python3 sn_clipboard.py"
+        sys.exit(f"Supernote Clipboard is not running. Start it first with: {start}")
 
 
 def main():

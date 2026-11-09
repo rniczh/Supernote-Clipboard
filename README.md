@@ -31,6 +31,7 @@ The latest files are on the [Releases](../../releases) page.
 | --- | --- |
 | `PCClipboard.snplg` | The plugin ([step 2](#2-install-the-plugin-on-your-supernote)) |
 | `SupernoteClipboard-macOS-<version>.zip` | The macOS menu bar app. Apple Silicon and Intel, macOS 13 or newer. |
+| `SupernoteClipboard-Windows-<version>.zip` | The Windows app. Unzip it and run `SupernoteClipboard.exe`. |
 
 Installing the Mac app:
 
@@ -39,7 +40,7 @@ Installing the Mac app:
 3. It runs on Python 3, which is not inside the app. macOS may ask you to install the command line developer tools.
 4. The first capture asks for Screen Recording. Turn on Supernote Clipboard under System Settings → Privacy & Security → Screen Recording, then quit the app and open it again.
 
-Windows and Linux have no packaged app. Run `desktop/sn_clipboard.py` from the source, below.
+Linux has no packaged app. Run `desktop/sn_clipboard.py` from the source, below.
 
 ## 1. Start Supernote Clipboard on your computer
 
@@ -56,6 +57,12 @@ desktop/macos/build-app.sh --install
 That needs the Xcode command line tools (`swiftc`). It builds Supernote Clipboard.app and puts it in /Applications. The camera icon in the menu bar has Capture Region, Open Window, Open at Login, Show Log, and Quit. The first capture asks for Screen Recording. Allow it, then quit and reopen.
 
 The app is a short Swift program (`desktop/macos/SupernoteClipboard.swift`) that runs a copy of `sn_clipboard.py`. After you change either file, run `build-app.sh --install` again. The build signs the app with a certificate kept in `~/Library/Application Support/Supernote Clipboard/`, created the first time you build, so the Screen Recording permission survives a rebuild. If macOS keeps asking even though Supernote Clipboard is already enabled, remove it from the Screen Recording list, or run `tccutil reset ScreenCapture com.rnic.supernote-clipboard`, and allow it again. Don't run the menu bar app and the terminal copy at the same time. Both want port 8765.
+
+### Windows app
+
+Unzip `SupernoteClipboard-Windows-<version>.zip` and double-click `SupernoteClipboard.exe`. A window stays open while it runs. Close that window to quit. The browser opens at `http://localhost:8765`.
+
+The first time a Supernote connects, Windows Firewall asks whether to allow Supernote Clipboard. Choose Allow on private networks. Windows will prevent an unrecognized app from starting. Choose More info, then Run anyway.
 
 ### From a terminal
 
@@ -190,7 +197,9 @@ supernote-plugin/android/app/src/main/java/com/pcclipboard/   PCNetworkInfo, PCH
    ditto -c -k --norsrc --noextattr --keepParent "dist/Supernote Clipboard.app" "dist/SupernoteClipboard-macOS-<version>.zip"
    ```
 
-3. On GitHub, open Releases → Draft a new release, make a tag such as `v1.3.0`, and attach `dist/PCClipboard.snplg` and the zip.
+   For Windows exe, pushing the version tag runs the Windows app action, which attaches `SupernoteClipboard-Windows-<version>.zip` to the release.
+
+3. On GitHub, open Releases → Draft a new release, make a tag such as `v*.*.*`, and attach `dist/PCClipboard.snplg` and the Mac zip.
 
 ## License
 

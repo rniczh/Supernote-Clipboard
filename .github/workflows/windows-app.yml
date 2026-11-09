@@ -1,0 +1,44 @@
+name: Windows app
+
+# PyInstaller has to run on Windows. This runner produces the exe users download.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Package the app
+        run: |
+          python -m pip install pyinstaller
+          python -m PyInstaller --noconfirm --clean --onefile --console --name SupernoteClipboard desktop/sn_clipboard.py
+
+      - name: Zip the exe
+        shell: pwsh
+        run: |
+          $match = Select-String -Path desktop/sn_clipboard.py -Pattern '^VERSION = "([^"]+)"'
+          $version = $match.Matches[0].Groups[1].Value
+          Compress-Archive -Path dist/SupernoteClipboard.exe -DestinationPath "dist/SupernoteClipboard-Windows-$version.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SupernoteClipboard-Windows
+          path: dist/SupernoteClipboard-Windows-*.zip
+
+      - name: Attach the zip to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SupernoteClipboard-Windows-*.zip
