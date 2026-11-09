@@ -7,4 +7,7 @@ supernote-plugin/android/.gradle/
 supernote-plugin/android_project_react_packages.txt
 __pycache__
 dist/
+/build/
+SupernoteClipboard.spec
 .DS_Store
+*.patch
