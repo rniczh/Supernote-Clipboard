@@ -12,7 +12,12 @@ export type Settings = {
   token: string;
 };
 
-export const EMPTY_SETTINGS: Settings = {serverUrl: '', serverId: '', serverName: '', token: ''};
+export const EMPTY_SETTINGS: Settings = {
+  serverUrl: '',
+  serverId: '',
+  serverName: '',
+  token: '',
+};
 let cached: Settings | null = null;
 
 /** The plugin's private directory needs no permission, unlike shared storage. */

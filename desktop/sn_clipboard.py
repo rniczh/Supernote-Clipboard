@@ -17,7 +17,9 @@ or TGA; anything other than PNG/JPEG is converted on arrival, since notes only t
 
 Storage limits are set in the web UI (or with --keep-days, --max-items, --max-mb):
 by default items are deleted after 7 days, only the newest 30 are kept, and there is
-no size limit. Each limit can be turned off.
+no size limit. The window can also keep an item for seconds, minutes, or hours.
+Each limit can be turned off. When "delete after paste" is on, a successful paste
+on the Supernote removes that item immediately; the time limit still removes the rest.
 
 The Supernote finds this app on your Wi-Fi network by itself. The first time a
 Supernote connects, the web UI asks you to allow it; after that it is paired and
@@ -53,11 +55,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "Supernote Clipboard"
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 DEFAULT_PORT = 8765
 # Storage limits; 0 means no limit. (default, largest accepted value)
+# keep_seconds is the age limit. Older configs stored keep_days and are converted on load.
 STORAGE_LIMITS = {
-    "keep_days": (7, 3650),
+    "keep_seconds": (7 * 86400, 3650 * 86400),
     "max_items": (30, 100000),
     "max_mb": (0, 1000000),
 }
@@ -88,6 +91,7 @@ class Config:
         self.port = DEFAULT_PORT
         self.watch_clipboard = True
         self.watch_text = True
+        self.delete_on_paste = False
         self.limits = {name: default for name, (default, _) in STORAGE_LIMITS.items()}
         self.hotkey = DEFAULT_HOTKEY
         self.devices = []  # [{"id", "name", "token", "pairedAt"}]
@@ -105,7 +109,14 @@ class Config:
         self.port = int(data.get("port") or DEFAULT_PORT)
         self.watch_clipboard = bool(data.get("watch_clipboard", True))
         self.watch_text = bool(data.get("watch_text", True))
-        self.set_limits({name: data[name] for name in STORAGE_LIMITS if name in data})
+        self.delete_on_paste = bool(data.get("delete_on_paste", False))
+        limits = {name: data[name] for name in STORAGE_LIMITS if name in data}
+        if "keep_seconds" not in data and "keep_days" in data:
+            try:
+                limits["keep_seconds"] = int(data["keep_days"]) * 86400
+            except (TypeError, ValueError):
+                pass
+        self.set_limits(limits)
         self.hotkey = str(data.get("hotkey", DEFAULT_HOTKEY))
         self.devices = [d for d in data.get("devices", []) if isinstance(d, dict) and d.get("token")]
         self.save()
@@ -118,6 +129,7 @@ class Config:
                 "port": self.port,
                 "watch_clipboard": self.watch_clipboard,
                 "watch_text": self.watch_text,
+                "delete_on_paste": self.delete_on_paste,
                 **self.limits,
                 "hotkey": self.hotkey,
                 "devices": self.devices,
@@ -127,7 +139,7 @@ class Config:
             tmp.replace(self.path)
 
     def set_limits(self, values):
-        """Update storage limits from {"keep_days"|"max_items"|"max_mb": number}; invalid values are ignored."""
+        """Update storage limits from {"keep_seconds"|"max_items"|"max_mb": number}; invalid values are ignored."""
         for name, value in values.items():
             if name not in STORAGE_LIMITS:
                 continue
@@ -165,9 +177,23 @@ class Config:
             return len(self.devices) != before
 
 
+def format_duration(seconds):
+    """'7 days', '1 hour', '2 minutes', '60 seconds'."""
+    seconds = int(seconds)
+    if seconds % 86400 == 0:
+        count, unit = seconds // 86400, "day"
+    elif seconds % 3600 == 0:
+        count, unit = seconds // 3600, "hour"
+    elif seconds % 60 == 0:
+        count, unit = seconds // 60, "minute"
+    else:
+        count, unit = seconds, "second"
+    return f"{count} {unit}" if count == 1 else f"{count} {unit}s"
+
+
 def describe_limits(limits):
     parts = [
-        f"{limits['keep_days']} day(s)" if limits["keep_days"] else "no time limit",
+        format_duration(limits["keep_seconds"]) if limits["keep_seconds"] else "no time limit",
         f"newest {limits['max_items']} items" if limits["max_items"] else "no item limit",
         f"up to {limits['max_mb']} MB" if limits["max_mb"] else "no size limit",
     ]
@@ -548,12 +574,12 @@ class ClipStore:
 
     def prune(self):
         """Apply the storage limits, oldest items first. The size limit never deletes the newest item."""
-        keep_days, max_items, max_mb = (self.limits[k] for k in ("keep_days", "max_items", "max_mb"))
+        keep_seconds, max_items, max_mb = (self.limits[k] for k in ("keep_seconds", "max_items", "max_mb"))
         removed = {"age": 0, "count": 0, "size": 0}
         with self.lock:
             kept = list(self.shots)
-            if keep_days:
-                cutoff = (time.time() - keep_days * 86400) * 1000
+            if keep_seconds:
+                cutoff = (time.time() - keep_seconds) * 1000
                 fresh = [s for s in kept if s["createdAt"] >= cutoff]
                 removed["age"] = len(kept) - len(fresh)
                 kept = fresh
@@ -575,7 +601,7 @@ class ClipStore:
                 self._save()
             self.usage = sum(sizes)
         reasons = {
-            "age": f"older than {keep_days} day(s)",
+            "age": f"older than {format_duration(keep_seconds)}",
             "count": f"beyond the newest {max_items}",
             "size": f"over {max_mb} MB",
         }
@@ -1375,6 +1401,7 @@ class App:
             "devices": [{k: d[k] for k in ("id", "name", "pairedAt")} for d in self.config.devices],
             "watchClipboard": self.config.watch_clipboard,
             "watchText": self.config.watch_text,
+            "deleteOnPaste": self.config.delete_on_paste,
             "limits": dict(self.config.limits),
             "usageBytes": self.store.usage,
             "capturing": self.capturing,
@@ -1545,6 +1572,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(429, "Too many pairing requests. Try again in a minute.")
             return self._json({"requestId": request_id})
 
+        if path == "/api/pasted":
+            self._note_client()
+            if not self._device():
+                return self._error(401, "This Supernote is not paired with this computer.")
+            try:
+                payload = json.loads(self._read_body(4096) or b"{}")
+            except ValueError:
+                return self._error(400, "Invalid JSON.")
+            deleted = app.config.delete_on_paste and app.store.delete(str(payload.get("id", "")))
+            return self._json({"ok": True, "deleted": bool(deleted)})
+
         # The custom header forces a CORS preflight, which this server never approves,
         # so other websites open in the browser cannot drive these endpoints.
         if not self._is_local() or self.headers.get("X-SN-Local") != "1":
@@ -1589,6 +1627,8 @@ class Handler(BaseHTTPRequestHandler):
                 app.config.watch_clipboard = bool(payload["watchClipboard"])
             if "watchText" in payload:
                 app.config.watch_text = bool(payload["watchText"])
+            if "deleteOnPaste" in payload:
+                app.config.delete_on_paste = bool(payload["deleteOnPaste"])
             if isinstance(payload.get("limits"), dict):
                 app.config.set_limits(payload["limits"])
                 app.store.prune()
@@ -1614,10 +1654,12 @@ def exit_with_parent():
     threading.Thread(target=watch, daemon=True, name="parent-watch").start()
 
 
-def start_pruning(store, interval=600):
+def start_pruning(store):
     def loop():
         while True:
-            time.sleep(interval)
+            keep = store.limits.get("keep_seconds") or 0
+            # A one-minute limit cannot wait for the old ten-minute pass.
+            time.sleep(5 if 0 < keep < 3600 else 60)
             store.prune()
 
     threading.Thread(target=loop, daemon=True, name="prune").start()
@@ -1637,7 +1679,9 @@ def serve(args):
     if args.hotkey is not None:
         config.hotkey = "" if args.hotkey.lower() in ("", "off", "none") else args.hotkey
         config.save()
-    limit_args = {name: getattr(args, name) for name in STORAGE_LIMITS if getattr(args, name) is not None}
+    limit_args = {name: getattr(args, name) for name in ("max_items", "max_mb") if getattr(args, name, None) is not None}
+    if getattr(args, "keep_days", None) is not None:
+        limit_args["keep_seconds"] = max(0, args.keep_days) * 86400
     if limit_args:
         config.set_limits(limit_args)
         config.save()
@@ -1669,7 +1713,10 @@ def serve(args):
     print(f"  Capture:      {capture}")
     print(f"  Network:      {addresses}")
     print(f"  Paired:       {len(config.devices)} Supernote(s)")
-    print(f"  Keeps:        {describe_limits(config.limits)}")
+    keeps = describe_limits(config.limits)
+    if config.delete_on_paste:
+        keeps += ", delete on paste"
+    print(f"  Keeps:        {keeps}")
     print(f"  Data folder:  {DATA_DIR}")
     if SYSTEM == "Windows":
         print("  Firewall:     If Windows asks, allow this app on private networks.")
@@ -1715,7 +1762,8 @@ def main():
         p.add_argument("--no-browser", action="store_true", help="do not open the window in a browser")
         p.add_argument("--no-watch", action="store_true", help="do not import screenshots from the clipboard")
         p.add_argument("--keep-days", type=int, metavar="N",
-                       help=f"delete items after N days, 0 = no limit (default {STORAGE_LIMITS['keep_days'][0]})")
+                       help=f"delete items after N days, 0 = no limit (default {STORAGE_LIMITS['keep_seconds'][0] // 86400}). "
+                            "Shorter times, such as 60s or 1h, are set in the window.")
         p.add_argument("--max-items", type=int, metavar="N",
                        help=f"keep only the newest N items, 0 = no limit (default {STORAGE_LIMITS['max_items'][0]})")
         p.add_argument("--max-mb", type=int, metavar="N",
@@ -1838,14 +1886,16 @@ INDEX_HTML = r"""<!doctype html>
   <section class="card">
     <div class="row">
       <b>Storage</b>
-      <label class="toggle">Delete after <select id="keep_days"></select></label>
+      <label class="toggle">Time limit <select id="keep_seconds"></select></label>
       <label class="toggle">Keep at most <select id="max_items"></select></label>
       <label class="toggle">Use at most <select id="max_mb"></select></label>
       <span style="flex:1"></span>
       <button id="clear" class="small">Clear all</button>
     </div>
-    <div class="hint" style="margin-top:8px"><span id="usage"></span> The oldest items are deleted first;
-      the size limit never deletes the newest item.</div>
+    <div class="row" style="margin-top:12px">
+      <label class="toggle"><input type="checkbox" id="deleteOnPaste"> Delete an item after the Supernote pastes it</label>
+    </div>
+    <div class="hint" style="margin-top:8px"><span id="usage"></span> Items are deleted after the time limit, or when pasted if that option is on. The note keeps its picture.</div>
   </section>
 
   <div id="drop">Drop images here (PNG, JPEG, WebP, HEIC, AVIF, GIF, SVG, TIFF, BMP, ...), or press
@@ -1885,14 +1935,43 @@ function fmtTime(ms) {
   return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-// Storage limit choices; 0 = no limit.
+function formatDuration(seconds) {
+  if (seconds % 86400 === 0) {
+    const days = seconds / 86400;
+    return days === 1 ? "1 day" : `${days} days`;
+  }
+  if (seconds % 3600 === 0) {
+    const hours = seconds / 3600;
+    return hours === 1 ? "1 hour" : `${hours} hours`;
+  }
+  if (seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+  }
+  return seconds === 1 ? "1 second" : `${seconds} seconds`;
+}
+
+function parseDuration(text) {
+  const match = String(text).trim().match(/^(\d+)\s*(s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)?$/i);
+  if (!match) return NaN;
+  const count = parseInt(match[1], 10);
+  const unit = (match[2] || "s").charAt(0).toLowerCase();
+  const scale = unit === "d" ? 86400 : unit === "h" ? 3600 : unit === "m" ? 60 : 1;
+  return count * scale;
+}
+
+// Storage limit choices; 0 = no limit. keep_seconds is the age, in seconds.
 const LIMITS = {
-  keep_days: { presets: [1, 3, 7, 14, 30, 90, 365], label: n => n === 1 ? "1 day" : `${n} days`,
-               ask: "Delete items after how many days?" },
+  keep_seconds: {
+    presets: [60, 120, 3600, 86400, 3 * 86400, 7 * 86400, 14 * 86400, 30 * 86400, 90 * 86400, 365 * 86400],
+    label: formatDuration,
+    parse: parseDuration,
+    ask: "Delete items after how long? Examples: 60s, 2m, 1h, 7d. 0 = no limit.",
+  },
   max_items: { presets: [10, 30, 50, 100, 200, 500, 1000], label: n => n === 1 ? "1 item" : `${n} items`,
-               ask: "Keep at most how many items?" },
+               ask: "Keep at most how many items? (0 = no limit)" },
   max_mb: { presets: [50, 100, 250, 500, 1000, 5000], label: n => n >= 1000 && n % 1000 === 0 ? `${n / 1000} GB` : `${n} MB`,
-            ask: "Use at most how many MB?" },
+            ask: "Use at most how many MB? (0 = no limit)" },
 };
 
 function fmtBytes(n) {
@@ -1917,8 +1996,9 @@ function changeLimit(name) {
   const select = $(name);
   let value = select.value;
   if (value === "custom") {
-    const answer = prompt(LIMITS[name].ask + " (0 = no limit)", select.dataset.value);
-    value = answer === null ? NaN : parseInt(answer, 10);
+    const answer = prompt(LIMITS[name].ask, LIMITS[name].parse ? "" : select.dataset.value);
+    const parse = LIMITS[name].parse || (text => parseInt(text, 10));
+    value = answer === null ? NaN : parse(answer);
     if (!(value >= 0)) { select.value = select.dataset.value; return; }
   }
   const limits = {};
@@ -1955,6 +2035,7 @@ function render(state) {
   renderPairing(state);
   $("watch").checked = state.watchClipboard;
   $("watchText").checked = state.watchText;
+  $("deleteOnPaste").checked = !!state.deleteOnPaste;
   Object.keys(LIMITS).forEach(name => renderLimit(name, state.limits[name]));
   const count = state.shots.length;
   $("usage").textContent = `Using ${fmtBytes(state.usageBytes)} for ${count} item${count === 1 ? "" : "s"}.`;
@@ -2039,6 +2120,7 @@ async function upload(blob) {
 $("capture").onclick = () => post("/local/capture").then(refresh);
 $("watch").onchange = e => post("/local/settings", { watchClipboard: e.target.checked }).then(refresh);
 $("watchText").onchange = e => post("/local/settings", { watchText: e.target.checked }).then(refresh);
+$("deleteOnPaste").onchange = e => post("/local/settings", { deleteOnPaste: e.target.checked }).then(refresh);
 Object.keys(LIMITS).forEach(name => $(name).onchange = () => changeLimit(name));
 $("clear").onclick = () => confirm("Delete everything copied so far?") && post("/local/clear").then(refresh);
 document.addEventListener("paste", e => {

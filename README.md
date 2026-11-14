@@ -92,17 +92,19 @@ Other commands: `sn_clipboard.py add image.png`, `sn_clipboard.py --port 9000`, 
 
 Everything stays in `~/.sn-clipboard/`. Images and text are in `shots/`. Paired Supernotes are in `config.json`. Nothing is uploaded. Only a Supernote you have allowed can download items, and only on your local network.
 
-Storage in the window has three limits. Each one can be No limit, or a number you type under Custom...
+Storage in the window has three limits. Each one can be No limit, or a value you type under Custom... Time limit accepts a time such as `60s`, `2m`, `1h`, or `7d`. The menu bar shows the current choice.
 
 | Limit | Default | Command line |
 | --- | --- | --- |
-| Delete after. Older items are removed. | 7 days | `--keep-days N` |
+| Time limit. Older items are removed. | 7 days | `--keep-days N` |
 | Keep at most. Only the newest items stay. | 30 items | `--max-items N` |
 | Use at most. The oldest items go when the folder grows past this. | No limit | `--max-mb N` |
 
-On the command line, `0` means no limit. The window shows how much space the items are using. A size limit will not delete the newest item, so one large screenshot can still be pasted. Delete removes one item. Clear all removes every item.
+On the command line, `0` means no limit. Shorter than a day is set in the window. The window shows how much space the items are using. A size limit will not delete the newest item, so one large screenshot can still be pasted. Delete removes one item. Clear all removes every item.
 
-Pictures you paste also land in `SCREENSHOT/PC Clipboard/` on the Supernote. The plugin does not empty that folder. Pasted text only exists in the note.
+Turn on "Delete an item after the Supernote pastes it" and that item is removed as soon as the paste succeeds. The time limit still removes anything that was not pasted. Either one is enough.
+
+A picture is saved in `SCREENSHOT/PC Clipboard/` on the Supernote before it is placed in the note, and that copy stays there. The picture in the note is separate. Photos sent from a phone are saved in the same folder. Pasted text is only in the note.
 
 ## 2. Install the plugin on your Supernote
 

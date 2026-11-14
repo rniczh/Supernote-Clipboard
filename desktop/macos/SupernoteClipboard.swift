@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var quitting = false
 
     private lazy var captureItem = item("Capture Region", #selector(capture))
+    private lazy var timeLimitItem = item("Time limit: Open Window to change it", #selector(openWindow))
     private lazy var statusLine = NSMenuItem(title: "Starting...", action: nil, keyEquivalent: "")
     private lazy var loginItem = item("Open at Login", #selector(toggleLogin))
 
@@ -40,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for entry in [
             captureItem,
             item("Open Window", #selector(openWindow)),
+            timeLimitItem,
             .separator(),
             statusLine,
             .separator(),
@@ -81,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let items = (state["shots"] as? [Any])?.count ?? 0
             let devices = paired == 0 ? "No Supernote paired" : "Paired with \(paired) Supernote\(paired == 1 ? "" : "s")"
             self.statusLine.title = "\(devices) · \(items) item\(items == 1 ? "" : "s") to paste"
+            self.timeLimitItem.title = self.timeLimitTitle(state)
         }
     }
 
@@ -211,6 +214,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let state = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             DispatchQueue.main.async { done(state) }
         }.resume()
+    }
+
+    private func timeLimitTitle(_ state: [String: Any]) -> String {
+        let limits = state["limits"] as? [String: Any]
+        let seconds = integer(limits?["keep_seconds"]) ?? integer(limits?["keep_days"]).map { $0 * 86400 }
+        let onPaste = state["deleteOnPaste"] as? Bool ?? false
+        guard let seconds else { return "Time limit: Open Window to change it" }
+        if seconds <= 0 {
+            return onPaste ? "Time limit: until pasted" : "Time limit: no limit"
+        }
+        return onPaste ? "Time limit: \(formatDuration(seconds)), or when pasted" : "Time limit: \(formatDuration(seconds))"
+    }
+
+    private func integer(_ value: Any?) -> Int? {
+        (value as? NSNumber)?.intValue
+    }
+
+    private func formatDuration(_ seconds: Int) -> String {
+        let (count, unit): (Int, String)
+        if seconds % 86400 == 0 {
+            (count, unit) = (seconds / 86400, "day")
+        } else if seconds % 3600 == 0 {
+            (count, unit) = (seconds / 3600, "hour")
+        } else if seconds % 60 == 0 {
+            (count, unit) = (seconds / 60, "minute")
+        } else {
+            (count, unit) = (seconds, "second")
+        }
+        return count == 1 ? "1 \(unit)" : "\(count) \(unit)s"
     }
 
     /// Shows the capture shortcut ("alt+shift+s") next to the menu item.

@@ -153,7 +153,7 @@ export async function connect({
 
   progress(`Found ${info.name}. Asking it to pair with this Supernote...`);
   const token = await pair(url, progress);
-  const paired = {serverUrl: url, serverId: info.serverId, serverName: info.name, token};
+  const paired = {...saved, serverUrl: url, serverId: info.serverId, serverName: info.name, token};
   await saveSettings(paired);
   progress(`Paired with ${info.name}.`);
   return paired;

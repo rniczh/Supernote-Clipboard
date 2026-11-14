@@ -356,8 +356,9 @@ function SettingsScreen() {
   };
 
   const forget = async () => {
-    await saveSettings(EMPTY_SETTINGS);
-    setSettings(EMPTY_SETTINGS);
+    const next = {...EMPTY_SETTINGS};
+    await saveSettings(next);
+    setSettings(next);
     setNotice({text: 'Forgot the computer. It will be searched for again on the next paste.', error: false});
   };
 
