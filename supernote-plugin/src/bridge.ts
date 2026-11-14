@@ -193,6 +193,19 @@ export async function getClipText(settings: Settings, clip: Clip): Promise<strin
   return body.text;
 }
 
+/** Tell the computer this item was pasted. The computer deletes it only when that option is on. */
+export async function reportPasted(settings: Settings, id: string) {
+  try {
+    await request(`${settings.serverUrl}/api/pasted`, {
+      method: 'POST',
+      token: settings.token,
+      body: {id},
+    });
+  } catch {
+    // The note already has the item. A missed report only leaves it on the computer until its time limit.
+  }
+}
+
 export function tokenHeaders(settings: Settings): Record<string, string> {
   return {'X-SN-Token': settings.token};
 }

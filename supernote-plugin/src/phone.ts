@@ -34,6 +34,7 @@ export type PhoneSession = {
 
 const server = NativeModules.PCPhoneServer;
 let state: PhoneSession = {status: 'off', url: null, message: null};
+
 const listeners = new Set<() => void>();
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 let queue: Promise<void> = Promise.resolve();

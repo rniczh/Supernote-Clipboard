@@ -3,6 +3,7 @@ import {PluginCommAPI, PluginFileAPI, PluginManager, PluginNoteAPI} from 'sn-plu
 import {
   getClipText,
   getLatestClip,
+  reportPasted,
   shotUrl,
   tokenHeaders,
   unreachableError,
@@ -29,7 +30,11 @@ const WIDE_CHAR_RE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe3
 
 type Size = {width: number; height: number};
 
-let busy = false;
+/** The paste that currently owns the button. 0 means idle. */
+let pasteOwner = 0;
+let pasteSerial = 0;
+/** A paste that never returns must not lock the button until the plugin is restarted. */
+const PASTE_LOCK_MS = 45_000;
 
 /** Page size in pixels of the open note, falling back to the device's screen size. */
 async function currentPageSize(): Promise<Size> {
@@ -157,31 +162,35 @@ export async function insertTextBox(text: string): Promise<boolean> {
 
 /** Paste a clip from the computer (the newest one by default) into the open note. */
 export async function pasteClip(clip?: Clip, progress: Progress = toast) {
-  if (busy) {
-    throw new UserError('Already pasting.');
+  const settings = await connect({progress});
+  const target = clip ?? (await getLatestClip(settings));
+  if (!target) {
+    throw new UserError(
+      'Nothing to paste yet. Take a screenshot or copy some text on your computer first.',
+    );
   }
-  busy = true;
-  try {
-    const settings = await connect({progress});
-    const target = clip ?? (await getLatestClip(settings));
-    if (!target) {
-      throw new UserError(
-        'Nothing to paste yet. Take a screenshot or copy some text on your computer first.',
-      );
-    }
-    if (target.kind === 'text') {
-      const fits = await insertTextBox(await getClipText(settings, target));
-      return fits ? 'Text pasted.' : 'Text pasted. It is long, so part of it may be off the page.';
-    }
-    await insertImage(await download(settings, target));
-    return 'Screenshot pasted.';
-  } finally {
-    busy = false;
+  if (target.kind === 'text') {
+    const fits = await insertTextBox(await getClipText(settings, target));
+    await reportPasted(settings, target.id);
+    return fits ? 'Text pasted.' : 'Text pasted. It is long, so part of it may be off the page.';
   }
+  await insertImage(await download(settings, target));
+  await reportPasted(settings, target.id);
+  return 'Screenshot pasted.';
 }
 
 /** Paste and report the outcome; on failure the plugin view opens with the reason. */
 export async function pasteAndReport(clip?: Clip) {
+  if (pasteOwner !== 0) {
+    return;
+  }
+  const mine = ++pasteSerial;
+  pasteOwner = mine;
+  const timer = setTimeout(() => {
+    if (pasteOwner === mine) {
+      pasteOwner = 0;
+    }
+  }, PASTE_LOCK_MS);
   try {
     toast('Pasting...');
     toast(await pasteClip(clip));
@@ -192,5 +201,10 @@ export async function pasteAndReport(clip?: Clip) {
       error: true,
     });
     await PluginManager.showPluginView().catch(() => {});
+  } finally {
+    clearTimeout(timer);
+    if (pasteOwner === mine) {
+      pasteOwner = 0;
+    }
   }
 }
